@@ -24,12 +24,18 @@
 ---
 
 **Kasumi** (霞, "mist") streams your GeForce NOW library to the New 3DS, New
-3DS XL and New 2DS XL. The games run on NVIDIA's servers; the 3DS decodes the
-video in hardware, plays the audio and sends your buttons back. It is not
-affiliated with NVIDIA or with the OpenNOW project.
+3DS XL and New 2DS XL: **cloud gaming on the 3DS, no PC needed**. Play your
+Steam, Epic and other PC games on a 3DS; they run on NVIDIA's servers, while
+the 3DS decodes the video in hardware, plays the audio and sends your buttons
+back. It is not affiliated with NVIDIA or with the OpenNOW project.
 
-> **Status: beta.** Kasumi is in active development and testing. Expect rough
-> edges, and please report what you find.
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=mM7W9iZ7E_Q"><img src="https://img.youtube.com/vi/mM7W9iZ7E_Q/hqdefault.jpg" width="480" alt="Kasumi showcase video: GeForce NOW on the New 3DS"></a><br>
+  <sub>▶ Watch the showcase on YouTube</sub>
+</p>
+
+> **Public beta.** Kasumi works well for everyday play, but it is still in
+> active development: expect rough edges, and please report what you find.
 
 ## Features
 
@@ -66,8 +72,9 @@ affiliated with NVIDIA or with the OpenNOW project.
 - **Stream menu** (hold START + SELECT): screenshots, controls sheet, zoom
   zones, gyro, sound and disconnect.
 - **Remote keyboard and touchpad** for launchers, sign-in screens and chat.
-- **Comfort**: five colour themes, stream volume, session timer, automatic
-  reconnect, and pause-on-lid-close that resumes on the same rig.
+- **Comfort**: five colour themes, stream volume, session timer, and
+  automatic reconnect, including after closing the lid, back onto the same
+  rig.
 - **First-run guide** that walks you through everything (skippable).
 - **Updates itself** from GitHub, with release notes on the console.
 
@@ -161,6 +168,22 @@ click, D-Pad direction, or nothing. Only that game uses the mapping.
 
 ## FAQ
 
+**Can you cloud game on a 3DS without a PC?**
+Yes. With Kasumi, a New 3DS streams games straight from GeForce NOW's cloud
+servers. You don't need a gaming PC, only the 3DS, Wi-Fi and a GeForce NOW
+account.
+
+**How do I play Steam or other PC games on a 3DS?**
+Link your Steam, Epic, Ubisoft or other store account in GeForce NOW (on
+[play.geforcenow.com](https://play.geforcenow.com) or its app), then launch the
+game from Kasumi's library. The game runs on NVIDIA's servers using the copy
+you own, and the 3DS is your screen and controller.
+
+**How is Kasumi different from Moonlight?**
+[Moonlight](https://github.com/zoeyjodon/moonlight-N3DS) streams games from
+*your own* PC at home. Kasumi streams from GeForce NOW's servers, so no PC is
+needed. If you have a gaming PC, Moonlight is a great option too.
+
 **Do I need a paid GeForce NOW membership?**
 No. The free tier works, with a queue before each session and a one-hour
 limit. Kasumi shows the queue with a wait estimate and warns you before the
@@ -175,10 +198,43 @@ The 3DS screen and decoder are built for 30 FPS video, and its 2.4 GHz Wi-Fi
 starts losing packets above roughly 1.2 Mbps. Kasumi is tuned for a smooth,
 steady picture within those limits.
 
-**Is my account safe?**
-Kasumi signs in through NVIDIA's own device-code page and never sees your
-password. It is an unofficial client, so, as with any third-party client,
-use it at your own discretion.
+**How is the latency?**
+It depends mostly on your distance to NVIDIA's servers and on your Wi-Fi. In
+testing, the network round trip was around 60-80 ms, plus one or two frames
+that Kasumi holds back to keep the picture smooth. It feels fine for
+adventure, RPG and most action games, less so for competitive shooters. The
+stream stats show your live ping.
+
+**Is my account safe? Should I link Steam?**
+Kasumi signs in through NVIDIA's own device-code page on your phone or PC and
+never sees your NVIDIA password. It never sees your Steam password either:
+store accounts are linked inside GeForce NOW itself, not in Kasumi. The code
+is open source, so anyone can check what it does. It is an unofficial client,
+so, as with any third-party client, use it at your own discretion.
+
+**My game save is gone. Did Kasumi delete it?**
+No. Kasumi never touches saves: they are kept by the game's store (Steam
+Cloud, Epic, Ubisoft...) or the game's own account. Leaving the stream closes
+the game at once, so **quit from the game's own menu first** to let it save
+and sync. Also check you launched the same store's version as before.
+
+**GeForce NOW in my country is sold by an internet provider. Does it work?**
+Not yet. In some countries GeForce NOW is run by a local partner (the
+GeForce NOW Alliance) with its own accounts and servers; Kasumi only works
+with NVIDIA's own service for now.
+
+**"Launch failed: CloudMatch HTTP 429"?**
+NVIDIA's servers are refusing new sessions for a moment. Close GeForce NOW on
+any other device or browser tab, wait a few minutes, and try again. Launching
+several games quickly in a row can trigger it.
+
+**Does it run on an emulator (Citra / Azahar)?**
+No. Kasumi needs the New 3DS hardware video decoder and a real network
+connection.
+
+**What happens when I close the lid mid-game?**
+The 3DS turns Wi-Fi off when the lid closes, so the stream stops. Kasumi keeps
+your game on the rig and reconnects on its own when you open the lid again.
 
 **Which games work?**
 Any game in your GeForce NOW library. Kasumi shows up as a standard
