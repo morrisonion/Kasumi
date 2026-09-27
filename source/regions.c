@@ -1,16 +1,10 @@
 #include "regions.h"
 
 #include <3ds.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <jansson.h>
-#include <netdb.h>
-#include <poll.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <time.h>
-#include <unistd.h>
 
 #include "app_paths.h"
 #include "diagnostic.h"
@@ -19,6 +13,13 @@
 #define REGIONS_PATH APP_DATA_DIR "/regions.json"
 /* Servers don't move; a network's measurement stays good for a week. */
 #define REGIONS_MAX_AGE (7 * 24 * 3600)
+/* Version 2 measures with HTTP round trips. Version 1 timed a non-blocking
+ * TCP connect, which the 3DS socket service reports ready too early: the
+ * numbers were noise, and Auto picked Texas from Europe (beta.13). */
+#define REGIONS_VERSION 2
+/* NVIDIA's own region for this address is kept unless another measures at
+ * least this much faster: measurements wobble by a few ms. */
+#define REGIONS_MARGIN_MS 15
 
 static LightLock g_lock = 1;
 static Region g_regions[REGION_MAX];
@@ -26,6 +27,8 @@ static unsigned g_count;
 static char g_measured_ssid[40];
 static int64_t g_measured_at;
 static char g_choice[40];
+/* NVIDIA's guess of the region for this internet address ("local-region"). */
+static char g_local[40];
 
 static void current_ssid(char *out, size_t size)
 {
@@ -43,7 +46,8 @@ static void save(void)
     for (unsigned i = 0; i < g_count; ++i)
         json_array_append_new(list, json_pack("{s:s,s:s,s:i}", "name", g_regions[i].name,
                                               "url", g_regions[i].url, "ms", g_regions[i].ms));
-    json_t *root = json_pack("{s:o,s:s,s:I}", "regions", list, "ssid", g_measured_ssid,
+    json_t *root = json_pack("{s:i,s:o,s:s,s:s,s:I}", "version", REGIONS_VERSION, "regions", list,
+                             "local", g_local, "ssid", g_measured_ssid,
                              "measured_at", (json_int_t)g_measured_at);
     LightLock_Unlock(&g_lock);
     if (root) json_dump_file(root, REGIONS_PATH, JSON_INDENT(1));
@@ -56,6 +60,9 @@ void regions_load(void)
     json_error_t error;
     json_t *root = json_load_file(REGIONS_PATH, 0, &error);
     json_t *list = json_is_object(root) ? json_object_get(root, "regions") : NULL;
+    json_t *version = json_is_object(root) ? json_object_get(root, "version") : NULL;
+    /* Older measurements are not trusted (see REGIONS_VERSION). */
+    const bool current = json_is_integer(version) && json_integer_value(version) == REGIONS_VERSION;
     size_t index;
     json_t *item;
     g_count = 0;
@@ -68,12 +75,14 @@ void regions_load(void)
         Region *r = &g_regions[g_count++];
         snprintf(r->name, sizeof(r->name), "%s", name);
         snprintf(r->url, sizeof(r->url), "%s", url);
-        r->ms = json_is_integer(ms) ? (int)json_integer_value(ms) : -1;
+        r->ms = current && json_is_integer(ms) ? (int)json_integer_value(ms) : -1;
     }
+    const char *local = json_is_object(root) ? json_string_value(json_object_get(root, "local")) : NULL;
+    snprintf(g_local, sizeof(g_local), "%s", local ? local : "");
     const char *ssid = json_is_object(root) ? json_string_value(json_object_get(root, "ssid")) : NULL;
     snprintf(g_measured_ssid, sizeof(g_measured_ssid), "%s", ssid ? ssid : "");
     json_t *at = json_is_object(root) ? json_object_get(root, "measured_at") : NULL;
-    g_measured_at = json_is_integer(at) ? (int64_t)json_integer_value(at) : 0;
+    g_measured_at = current && json_is_integer(at) ? (int64_t)json_integer_value(at) : 0;
     json_decref(root);
 }
 
@@ -94,11 +103,13 @@ bool regions_update(void)
     json_t *meta = json_is_object(root) ? json_object_get(root, "metaData") : NULL;
     Region fresh[REGION_MAX];
     unsigned count = 0;
+    char local[40] = "";
     size_t index;
     json_t *item;
     json_array_foreach(meta, index, item) {
         const char *key = json_string_value(json_object_get(item, "key"));
         const char *value = json_string_value(json_object_get(item, "value"));
+        if (key && value && !strcmp(key, "local-region")) snprintf(local, sizeof(local), "%s", value);
         if (!key || !value || strncmp(value, "https://", 8) || !strstr(value, ".nvidiagrid.net") ||
             count >= REGION_MAX)
             continue;
@@ -119,79 +130,99 @@ bool regions_update(void)
             if (!strcmp(fresh[i].url, g_regions[j].url)) fresh[i].ms = g_regions[j].ms;
     memcpy(g_regions, fresh, sizeof(Region) * count);
     g_count = count;
+    if (local[0]) snprintf(g_local, sizeof(g_local), "%s", local);
     LightLock_Unlock(&g_lock);
-    diagnostic_log("REGION", "list %u regions", count);
+    diagnostic_log("REGION", "list %u regions, NVIDIA's region for this address: %s", count,
+                   local[0] ? local : "unknown");
     save();
     return true;
 }
 
-/* TCP connect time to the region's HTTPS port: one round trip, without the
- * TLS handshake the 3DS would add. -1 if unreachable within the timeout. */
-static int connect_ms(const char *url, int timeout_ms)
+/* One region's round trip: a warm-up request opens the connection (TLS is
+ * slow on a 3DS and must not be timed), then the faster of two requests on
+ * that same connection. -1 if the region does not answer. */
+static int ping_ms(const char *base)
 {
-    char host[96];
-    const char *start = url + 8;
-    size_t n = strcspn(start, "/:");
-    if (n == 0 || n >= sizeof(host)) return -1;
-    memcpy(host, start, n);
-    host[n] = '\0';
-    struct addrinfo hints, *result = NULL;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, "443", &hints, &result) != 0 || !result) return -1;
-    const int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        freeaddrinfo(result);
-        return -1;
+    static const char *const headers[] = { "Accept: application/json" };
+    char url[128];
+    snprintf(url, sizeof(url), "%s/v2/serverInfo", base);
+    HttpResponse response;
+    http_next_request(5, NULL, NULL);
+    const bool warm = http_request("GET", url, "Kasumi-3DS", headers, 1, NULL, 64 * 1024, &response);
+    const long status = response.status;
+    http_response_free(&response);
+    if (!warm || status != 200) return -1;
+    int best = -1;
+    for (int i = 0; i < 2; ++i) {
+        http_next_request(5, NULL, NULL);
+        const u64 began = osGetTime();
+        const bool ok = http_request("GET", url, "Kasumi-3DS", headers, 1, NULL, 64 * 1024, &response);
+        const int ms = (int)(osGetTime() - began);
+        const bool good = ok && response.status == 200;
+        http_response_free(&response);
+        if (good && (best < 0 || ms < best)) best = ms;
     }
-    const int flags = fcntl(fd, F_GETFL, 0);
-    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-    const u64 began = osGetTime();
-    int ms = -1;
-    if (connect(fd, result->ai_addr, result->ai_addrlen) == 0) {
-        ms = (int)(osGetTime() - began);
-    } else if (errno == EINPROGRESS) {
-        struct pollfd p = { .fd = fd, .events = POLLOUT };
-        if (poll(&p, 1, timeout_ms) == 1 && (p.revents & POLLOUT) && !(p.revents & (POLLERR | POLLHUP)))
-            ms = (int)(osGetTime() - began);
-    }
-    freeaddrinfo(result);
-    close(fd);
-    return ms;
+    return best;
+}
+
+/* "eu", "us", "ca", "ap": the continent part of a region's host name. */
+static void continent(const char *url, char *out, size_t size)
+{
+    const char *host = strncmp(url, "https://", 8) ? url : url + 8;
+    size_t n = strcspn(host, "-.");
+    if (n >= size) n = size - 1;
+    memcpy(out, host, n);
+    out[n] = '\0';
+}
+
+static bool same_area(const char *a, const char *b)
+{
+    /* North America is one area: US and Canadian regions sit side by side. */
+    const bool a_na = !strcmp(a, "us") || !strcmp(a, "ca");
+    const bool b_na = !strcmp(b, "us") || !strcmp(b, "ca");
+    return a_na ? b_na : !strcmp(a, b);
 }
 
 void regions_measure(void)
 {
     Region list[REGION_MAX];
+    char local[40];
     LightLock_Lock(&g_lock);
     const unsigned count = g_count;
     memcpy(list, g_regions, sizeof(Region) * count);
+    snprintf(local, sizeof(local), "%s", g_local);
     LightLock_Unlock(&g_lock);
     if (!count) return;
-    /* One connect each, then two more for the closest few: far regions
-     * only need to be known as far. */
-    for (unsigned i = 0; i < count; ++i) list[i].ms = connect_ms(list[i].url, 900);
-    for (unsigned round = 0; round < 2; ++round) {
-        for (unsigned i = 0; i < count; ++i) {
-            if (list[i].ms < 0 || list[i].ms > 200) continue;
-            const int again = connect_ms(list[i].url, 900);
-            if (again >= 0 && again < list[i].ms) list[i].ms = again;
-        }
-    }
-    int best = -1;
+    /* Only the regions on NVIDIA's guessed continent: far ones cannot win,
+     * and every region costs a TLS handshake. */
+    char area[8] = "";
     for (unsigned i = 0; i < count; ++i)
-        if (list[i].ms >= 0 && (best < 0 || list[i].ms < list[best].ms)) best = (int)i;
+        if (!strcmp(list[i].name, local)) continent(list[i].url, area, sizeof(area));
+    unsigned measured = 0;
+    for (unsigned i = 0; i < count; ++i) {
+        char mine[8];
+        continent(list[i].url, mine, sizeof(mine));
+        if (area[0] && !same_area(area, mine)) {
+            list[i].ms = -1;
+            continue;
+        }
+        list[i].ms = ping_ms(list[i].url);
+        ++measured;
+        diagnostic_log("REGION", "ping %s %d ms", list[i].name, list[i].ms);
+    }
     LightLock_Lock(&g_lock);
     for (unsigned i = 0; i < count && i < g_count; ++i)
         if (!strcmp(g_regions[i].url, list[i].url)) g_regions[i].ms = list[i].ms;
     current_ssid(g_measured_ssid, sizeof(g_measured_ssid));
     g_measured_at = (int64_t)time(NULL);
     LightLock_Unlock(&g_lock);
-    if (best >= 0)
-        diagnostic_log("REGION", "measured %u regions: fastest %s %d ms", count, list[best].name, list[best].ms);
+    const int best = regions_fastest();
+    Region chosen;
+    if (best >= 0 && regions_get((unsigned)best, &chosen))
+        diagnostic_log("REGION", "measured %u of %u regions (area %s): fastest %s %d ms", measured, count,
+                       area[0] ? area : "all", chosen.name, chosen.ms);
     else
-        diagnostic_log("REGION", "measured %u regions: none reachable", count);
+        diagnostic_log("REGION", "measured %u of %u regions: none reachable", measured, count);
     save();
 }
 
@@ -214,10 +245,14 @@ bool regions_get(unsigned index, Region *out)
 
 int regions_fastest(void)
 {
-    int best = -1;
+    int best = -1, local = -1;
     LightLock_Lock(&g_lock);
-    for (unsigned i = 0; i < g_count; ++i)
-        if (g_regions[i].ms >= 0 && (best < 0 || g_regions[i].ms < g_regions[best].ms)) best = (int)i;
+    for (unsigned i = 0; i < g_count; ++i) {
+        if (g_regions[i].ms < 0) continue;
+        if (!strcmp(g_regions[i].name, g_local)) local = (int)i;
+        if (best < 0 || g_regions[i].ms < g_regions[best].ms) best = (int)i;
+    }
+    if (local >= 0 && best >= 0 && g_regions[local].ms <= g_regions[best].ms + REGIONS_MARGIN_MS) best = local;
     LightLock_Unlock(&g_lock);
     return best;
 }
