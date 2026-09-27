@@ -3,6 +3,8 @@
 #include <jansson.h>
 
 #include "audio_output.h"
+#include "regions.h"
+#include "stream_profile.h"
 #include "ui.h"
 #include <stdio.h>
 #include <sys/stat.h>
@@ -29,6 +31,8 @@ void settings_defaults(AppSettings *settings)
     /* Kasumi's own releases are betas for now, so beta is the default
      * channel; otherwise a beta build would never see its successor. */
     settings->update_beta = true;
+    settings->net_weak = false;
+    settings->server[0] = '\0';
 }
 
 unsigned settings_deadzone_percent(DeadzoneLevel level)
@@ -86,6 +90,9 @@ bool settings_load(AppSettings *settings)
     settings->guide_done = read_bool(root, "guide_done", settings->guide_done);
     settings->auto_update = read_bool(root, "auto_update", settings->auto_update);
     settings->update_beta = read_bool(root, "update_beta", settings->update_beta);
+    settings->net_weak = read_bool(root, "net_weak", settings->net_weak);
+    json_t *server = json_object_get(root, "server");
+    if (json_is_string(server)) snprintf(settings->server, sizeof(settings->server), "%s", json_string_value(server));
     json_decref(root);
     return true;
 }
@@ -94,7 +101,7 @@ bool settings_save(const AppSettings *settings)
 {
     mkdir("sdmc:/3ds", 0777);
     mkdir(APP_DATA_DIR, 0777);
-    json_t *root = json_pack("{s:i,s:i,s:b,s:b,s:b,s:b,s:b,s:i,s:b,s:i,s:i,s:i,s:i,s:b,s:i,s:b,s:b,s:b}",
+    json_t *root = json_pack("{s:i,s:i,s:b,s:b,s:b,s:b,s:b,s:i,s:b,s:i,s:i,s:i,s:i,s:b,s:i,s:b,s:b,s:b,s:b,s:s}",
                              "button_layout", (int)settings->button_layout,
                              "deadzone", (int)settings->deadzone,
                              "swap_shoulders", settings->swap_shoulders,
@@ -112,7 +119,9 @@ bool settings_save(const AppSettings *settings)
                              "lid_mode", (int)settings->lid_mode,
                              "guide_done", settings->guide_done,
                              "auto_update", settings->auto_update,
-                             "update_beta", settings->update_beta);
+                             "update_beta", settings->update_beta,
+                             "net_weak", settings->net_weak,
+                             "server", settings->server);
     if (!root) return false;
     const bool ok = json_dump_file(root, SETTINGS_PATH, JSON_INDENT(2)) == 0;
     json_decref(root);
@@ -123,6 +132,8 @@ void settings_apply_picture(const AppSettings *settings)
 {
     stream_profile_configure(settings->wide_video, settings->bitrate_mode);
     stream_profile_set_sharpen(settings->sharpen);
+    stream_profile_set_weak(settings->net_weak);
+    regions_set_choice(settings->server);
     ui_set_theme((UiTheme)settings->theme);
     audio_output_set_volume((float)settings->volume / 5.0f);
 }

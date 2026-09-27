@@ -756,8 +756,9 @@ static void rtp_decoder_update_gap_timer(RtpDecoder* rtp_decoder, uint32_t now_m
 }
 
 static void rtp_decoder_expire_gap(RtpDecoder* rtp_decoder, uint32_t now_ms) {
+  const uint32_t hold_ms = rtp_decoder->max_hold_ms ? rtp_decoder->max_hold_ms : RTP_REORDER_MAX_HOLD_MS;
   if (!rtp_decoder->reorder_gap_active ||
-      (uint32_t)(now_ms - rtp_decoder->reorder_gap_started_ms) < RTP_REORDER_MAX_HOLD_MS) {
+      (uint32_t)(now_ms - rtp_decoder->reorder_gap_started_ms) < hold_ms) {
     return;
   }
 

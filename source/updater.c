@@ -28,6 +28,10 @@ static char g_package_url[512];
 static char g_sums_url[512];
 static char g_package_name[32];
 static char g_dismissed[32];
+/* The newer version the last check found. The check result only lived in
+ * memory, so after a restart the UPDATE badge vanished and the next
+ * automatic check was up to 12 hours away (beta.12). */
+static char g_seen_newer[32];
 static bool g_installed_cia;
 
 /* ---- State file ----------------------------------------------------------- */
@@ -42,6 +46,7 @@ static void save_state(const char *whats_new_version, const char *whats_new_note
     }
     json_object_set_new(root, "checked_at", json_integer((json_int_t)g_info.checked_at));
     json_object_set_new(root, "dismissed", json_string(g_dismissed));
+    json_object_set_new(root, "available", json_string(g_seen_newer));
     if (whats_new_version)
         json_object_set_new(root, "whats_new", json_pack("{s:s,s:s}", "version", whats_new_version,
                                                          "notes", whats_new_notes ? whats_new_notes : ""));
@@ -61,6 +66,8 @@ void updater_init(const char *self_path)
         if (json_is_integer(checked)) g_info.checked_at = json_integer_value(checked);
         json_t *dismissed = json_object_get(root, "dismissed");
         if (json_is_string(dismissed)) snprintf(g_dismissed, sizeof(g_dismissed), "%s", json_string_value(dismissed));
+        json_t *available = json_object_get(root, "available");
+        if (json_is_string(available)) snprintf(g_seen_newer, sizeof(g_seen_newer), "%s", json_string_value(available));
     }
     json_decref(root);
     remove(DOWNLOAD_PATH);
@@ -99,10 +106,18 @@ static bool fail(const char *format, ...)
 
 bool updater_is_3dsx(void) { return envIsHomebrew(); }
 
+static bool parse_version(const char *text, long parts[4]);
+static int compare_versions(const long a[4], const long b[4]);
+
 bool updater_check_due(void)
 {
+    /* A newer version seen before: check again now to show it. */
+    long seen[4], current[4];
+    if (g_seen_newer[0] && parse_version(g_seen_newer, seen) && parse_version(APP_VERSION, current) &&
+        compare_versions(seen, current) > 0)
+        return true;
     const int64_t now = (int64_t)time(NULL);
-    return now - g_info.checked_at >= 12 * 3600 || now < g_info.checked_at;
+    return now - g_info.checked_at >= 4 * 3600 || now < g_info.checked_at;
 }
 
 /* ---- Versions -------------------------------------------------------------- */
@@ -242,6 +257,7 @@ bool updater_check(bool include_beta)
     }
     g_info.state = available ? UPDATE_AVAILABLE : UPDATE_UP_TO_DATE;
     g_info.progress = 0;
+    snprintf(g_seen_newer, sizeof(g_seen_newer), "%s", available ? g_info.latest : "");
     LightLock_Unlock(&g_lock);
     json_decref(root);
     save_state(NULL, NULL);

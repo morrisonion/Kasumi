@@ -37,4 +37,9 @@ bool stream_profile_probing(void);
  * off matches OpenNOW. (Build 62 also tried video.enableIntraRefresh; NVIDIA
  * ignored it and kept an IDR every 10.1 s, so that option was removed.) */
 void stream_profile_set_sharpen(bool sharpen);
+/* Weak Wi-Fi / phone hotspot: 0.6-1 Mbps whatever the bitrate setting (fewer
+ * packets per frame, so fewer frames hit by a loss), a longer wait for
+ * retransmissions and a bigger frame reserve. */
+void stream_profile_set_weak(bool weak);
+bool stream_profile_weak(void);
 bool stream_profile_sharpen(void);

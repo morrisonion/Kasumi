@@ -15,6 +15,7 @@
 #include "game_art.h"
 #include "game_prefs.h"
 #include "queue_alert.h"
+#include "regions.h"
 #include "updater.h"
 #include "play_history.h"
 #include "screenshot.h"
@@ -159,7 +160,11 @@ static void render_wide_video(bool draw_bottom)
         const u32 since = vblank - last_present_vblank;
         last_seen_vblank = vblank;
         const u64 now_ms = osGetTime();
-        if (reserve > 1 && now_ms - last_repeat_at >= 60000) reserve = 1;
+        /* Weak / hotspot keeps one more spare frame (+33 ms) against the
+         * longer, burstier gaps of mobile data. */
+        const unsigned reserve_low = stream_profile_weak() ? 2 : 1;
+        if (reserve < reserve_low) reserve = reserve_low;
+        if (reserve > reserve_low && now_ms - last_repeat_at >= 60000) reserve = reserve_low;
         unsigned ready = mvd_video_ready_frames();
         while (ready > reserve + 3) {
             mvd_video_skip_oldest_frame();
@@ -172,7 +177,7 @@ static void render_wide_video(bool draw_bottom)
             present = true;
         } else if (!ready && since == 2) {
             ++repeated;
-            if (last_repeat_at && now_ms - last_repeat_at < 20000) reserve = 2;
+            if (last_repeat_at && now_ms - last_repeat_at < 20000) reserve = reserve_low + 1;
             last_repeat_at = now_ms;
         }
         /* The spare frames must stay. NVIDIA sends 30.00 fps but the 3DS
@@ -1733,6 +1738,7 @@ int main(int argc, char **argv)
     g_app.current_game = &g_current_game;
     g_app.zone_index = -1;
     game_art_init();
+    regions_load();
     settings_load(&g_app.settings);
     g_app.guide_page = g_app.settings.guide_done ? -1 : 0;
     settings_apply_input(&g_app.settings);

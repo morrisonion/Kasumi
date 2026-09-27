@@ -43,6 +43,10 @@ typedef struct {
     /* Closing the lid mid-game (LID_*): pause with the connection kept,
      * sleep and reconnect on opening, or keep playing with the screens off. */
     unsigned lid_mode;
+    /* Weak Wi-Fi or a phone hotspot: lower bitrate, bigger buffers. */
+    bool net_weak;
+    /* GeForce NOW server: "" auto (lowest ping), "nvidia", or a region name. */
+    char server[40];
     /* The first-run guide was finished or skipped. */
     bool guide_done;
     /* Look for updates once or twice a day; include pre-releases (beta). */

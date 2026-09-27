@@ -3,6 +3,7 @@
 #include "http_client.h"
 #include "diagnostic.h"
 #include "stream_profile.h"
+#include "regions.h"
 
 #include <3ds.h>
 #include <jansson.h>
@@ -1226,8 +1227,7 @@ bool gfn_start_session(GfnClient *client, const GfnGame *game)
     client->media_port = 0;
     generate_uuid(client->session_client_id);
     get_device_id(client->session_device_id);
-    snprintf(client->session_base_url, sizeof(client->session_base_url),
-             "https://prod.cloudmatchbeta.nvidiagrid.net");
+    regions_resolve(client->session_base_url, sizeof(client->session_base_url));
     char *body = build_session_body(game, client->session_device_id);
     if (!body) {
         snprintf(client->status, sizeof(client->status), "Cannot build session request for appId %.40s", game->app_id);

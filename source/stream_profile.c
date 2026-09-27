@@ -7,6 +7,7 @@ static StreamBitrateMode g_bitrate = STREAM_BITRATE_ADAPTIVE;
 static unsigned g_override_width, g_override_height;
 static bool g_probing;
 static bool g_sharpen;
+static bool g_weak;
 
 void stream_profile_configure(bool wide, StreamBitrateMode bitrate)
 {
@@ -22,7 +23,8 @@ const char *stream_profile_name(void)
     static const char *const rates[STREAM_BITRATE_COUNT] = {
         "adaptive", "1 Mbps", "1.2 Mbps", "1.5 Mbps"
     };
-    snprintf(name, sizeof(name), "540p %s · %s", g_wide ? "wide" : "classic", rates[g_bitrate]);
+    snprintf(name, sizeof(name), "540p %s · %s", g_wide ? "wide" : "classic",
+             g_weak ? "weak link" : rates[g_bitrate]);
     return name;
 }
 
@@ -42,6 +44,8 @@ void stream_profile_set_override(unsigned width, unsigned height)
 void stream_profile_set_probing(bool probing) { g_probing = probing; }
 
 void stream_profile_set_sharpen(bool sharpen) { g_sharpen = sharpen; }
+void stream_profile_set_weak(bool weak) { g_weak = weak; }
+bool stream_profile_weak(void) { return g_weak; }
 bool stream_profile_sharpen(void) { return g_sharpen; }
 bool stream_profile_probing(void) { return g_probing; }
 
@@ -60,11 +64,13 @@ static unsigned steady_rate(void)
  * within 1-1.8 Mbps. Steady modes hold a floor, like the official mode 0. */
 unsigned stream_profile_initial_bitrate(void)
 {
+    if (g_weak) return 800;
     return g_bitrate == STREAM_BITRATE_ADAPTIVE ? 1200 : steady_rate();
 }
 
 unsigned stream_profile_min_bitrate(void)
 {
+    if (g_weak) return 600;
     return g_bitrate == STREAM_BITRATE_ADAPTIVE ? 1000 : steady_rate();
 }
 
@@ -72,10 +78,11 @@ unsigned stream_profile_max_bitrate(void)
 {
     /* Steady peaks stay close to the floor: keyframe bursts above the
      * average are what the 3DS radio loses first. */
+    if (g_weak) return 1000;
     return g_bitrate == STREAM_BITRATE_ADAPTIVE ? 1800 : steady_rate() + 250;
 }
 
 unsigned stream_profile_dynamic_mode(void)
 {
-    return g_bitrate == STREAM_BITRATE_ADAPTIVE ? 3 : 0;
+    return g_bitrate == STREAM_BITRATE_ADAPTIVE || g_weak ? 3 : 0;
 }

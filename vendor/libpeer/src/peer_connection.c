@@ -62,6 +62,12 @@ struct PeerConnection {
   uint16_t video_last_nack_expected;
   uint32_t video_last_nack_ms;
   int video_has_last_nack;
+  /* When each missing packet was last NACKed: asking again before a round
+   * trip has passed only makes the server send it twice. */
+  uint16_t nack_sequences[RTP_REORDER_WINDOW];
+  uint32_t nack_sent_ms[RTP_REORDER_WINDOW];
+  uint8_t nack_used[RTP_REORDER_WINDOW];
+  uint32_t max_video_hold_ms;
   uint32_t video_nack_requests;
   uint32_t video_nack_packets_requested;
   RtcpReceiverStats video_receiver_stats;
@@ -116,6 +122,29 @@ static uint32_t peer_connection_nack_packet_count(uint16_t bitmask) {
   return count;
 }
 
+/* A NACK for a packet is repeated only after about one round trip. */
+static uint32_t peer_connection_nack_interval_ms(PeerConnection* pc) {
+  const int rtt = agent_get_rtt_ms(&pc->agent);
+  uint32_t interval = rtt > 0 ? (uint32_t)rtt + 20 : 60;
+  if (interval < 40) interval = 40;
+  if (interval > 300) interval = 300;
+  return interval;
+}
+
+static int peer_connection_nack_due(PeerConnection* pc, uint16_t sequence,
+                                    uint32_t now_ms, uint32_t interval_ms) {
+  const size_t slot = sequence % RTP_REORDER_WINDOW;
+  return !(pc->nack_used[slot] && pc->nack_sequences[slot] == sequence &&
+           (uint32_t)(now_ms - pc->nack_sent_ms[slot]) < interval_ms);
+}
+
+static void peer_connection_nack_mark(PeerConnection* pc, uint16_t sequence, uint32_t now_ms) {
+  const size_t slot = sequence % RTP_REORDER_WINDOW;
+  pc->nack_used[slot] = 1;
+  pc->nack_sequences[slot] = sequence;
+  pc->nack_sent_ms[slot] = now_ms;
+}
+
 static void peer_connection_maybe_send_video_nacks(PeerConnection* pc,
                                                    uint16_t newest_sequence) {
   RtpDecoder* decoder = &pc->vrtp_decoder;
@@ -130,15 +159,13 @@ static void peer_connection_maybe_send_video_nacks(PeerConnection* pc,
     distance = RTP_REORDER_MAX_HOLD_PACKETS;
 
   const uint32_t now_ms = ports_get_epoch_time();
-  if (pc->video_has_last_nack && pc->video_last_nack_expected == expected &&
-      (uint32_t)(now_ms - pc->video_last_nack_ms) < 30) {
-    return;
-  }
+  const uint32_t interval_ms = peer_connection_nack_interval_ms(pc);
 
   int offset = 0;
   while (offset < distance) {
-    while (offset < distance && peer_connection_video_packet_buffered(
-             decoder, (uint16_t)(expected + offset))) {
+    while (offset < distance &&
+           (peer_connection_video_packet_buffered(decoder, (uint16_t)(expected + offset)) ||
+            !peer_connection_nack_due(pc, (uint16_t)(expected + offset), now_ms, interval_ms))) {
       offset++;
     }
     if (offset >= distance)
@@ -148,7 +175,8 @@ static void peer_connection_maybe_send_video_nacks(PeerConnection* pc,
     uint16_t bitmask = 0;
     for (int bit = 0; bit < 16 && offset + bit + 1 < distance; ++bit) {
       const uint16_t sequence = (uint16_t)(packet_id + bit + 1);
-      if (!peer_connection_video_packet_buffered(decoder, sequence))
+      if (!peer_connection_video_packet_buffered(decoder, sequence) &&
+          peer_connection_nack_due(pc, sequence, now_ms, interval_ms))
         bitmask |= (uint16_t)(1u << bit);
     }
 
@@ -156,6 +184,10 @@ static void peer_connection_maybe_send_video_nacks(PeerConnection* pc,
           pc, pc->remote_vssrc, packet_id, bitmask) >= 0) {
       pc->video_nack_requests++;
       pc->video_nack_packets_requested += peer_connection_nack_packet_count(bitmask);
+      peer_connection_nack_mark(pc, packet_id, now_ms);
+      for (int bit = 0; bit < 16; ++bit)
+        if (bitmask & (1u << bit))
+          peer_connection_nack_mark(pc, (uint16_t)(packet_id + bit + 1), now_ms);
     }
     offset += 17;
   }
@@ -668,6 +700,14 @@ int peer_connection_loop(PeerConnection* pc) {
       if ((uint32_t)(ports_get_epoch_time() - pc->last_consent_check_ms) >= 2000) {
         pc->last_consent_check_ms = ports_get_epoch_time();
         agent_send_consent_check(&pc->agent);
+        /* A retransmission takes about a round trip to arrive; at a fixed
+         * 150 ms, a 100-235 ms mobile hotspot lost 49 frames in 90 s. */
+        const int rtt = agent_get_rtt_ms(&pc->agent);
+        const uint32_t cap = pc->max_video_hold_ms ? pc->max_video_hold_ms : 300;
+        uint32_t hold = rtt > 0 ? (uint32_t)rtt + (uint32_t)rtt / 2 + 40 : RTP_REORDER_MAX_HOLD_MS;
+        if (hold < RTP_REORDER_MAX_HOLD_MS) hold = RTP_REORDER_MAX_HOLD_MS;
+        if (hold > cap) hold = cap;
+        pc->vrtp_decoder.max_hold_ms = hold;
       }
       if (pc->dtls_pending || mbedtls_ssl_check_pending(&pc->dtls_srtp.ssl)) {
         packet_processed = peer_connection_read_dtls(pc) > 0;
@@ -1241,6 +1281,15 @@ int peer_connection_get_udp_fd(PeerConnection* pc) {
     if (pc->agent.udp_sockets[i].fd > 0)
       return pc->agent.udp_sockets[i].fd;
   return -1;
+}
+
+void peer_connection_set_max_video_hold_ms(PeerConnection* pc, uint32_t max_ms) {
+  if (pc) pc->max_video_hold_ms = max_ms;
+}
+
+uint32_t peer_connection_get_video_hold_ms(PeerConnection* pc) {
+  if (!pc) return 0;
+  return pc->vrtp_decoder.max_hold_ms ? pc->vrtp_decoder.max_hold_ms : RTP_REORDER_MAX_HOLD_MS;
 }
 
 int peer_connection_get_rtt_ms(PeerConnection* pc) {

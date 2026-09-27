@@ -519,6 +519,8 @@ bool webrtc_transport_start(WebRtcTransport *t, NvstSignal *signal,
     PeerConnection *pc = peer_connection_create(&config);
     if (!pc) { snprintf(t->status, sizeof(t->status), "WebRTC peer allocation failed"); t->state = WEBRTC_FAILED; return false; }
     t->peer = pc;
+    /* Weak / hotspot links may wait longer for a lost packet's resend. */
+    peer_connection_set_max_video_hold_ms(pc, stream_profile_weak() ? 450 : 300);
     peer_connection_onicecandidate(pc, on_local_candidates);
     peer_connection_oniceconnectionstatechange(pc, on_state);
     peer_connection_ondatachannel(pc, on_data, on_data_open, on_data_close);
@@ -670,7 +672,7 @@ void webrtc_transport_tick(WebRtcTransport *t, NvstSignal *signal)
     const uint64_t now_diag = osGetTime();
     if (now_diag - t->last_diagnostic_at >= (t->video_access_units ? 10000u : 1000u)) {
         t->last_diagnostic_at = now_diag;
-        diagnostic_log("ICE", "pairs total=%d frozen=%d run=%d ok=%d fail=%d local=%u/%u remote=%u/%u mediaPort=%d remotePort=%d manual=%u checks=%lu/%lu sendFail=%lu errno=%d udpRx=%lu stunRx=%lu valid=%lu rtt=%d",
+        diagnostic_log("ICE", "pairs total=%d frozen=%d run=%d ok=%d fail=%d local=%u/%u remote=%u/%u mediaPort=%d remotePort=%d manual=%u checks=%lu/%lu sendFail=%lu errno=%d udpRx=%lu stunRx=%lu valid=%lu rtt=%d hold=%lu",
             t->ice_pairs_total, t->ice_pairs_frozen, t->ice_pairs_inprogress,
             t->ice_pairs_succeeded, t->ice_pairs_failed,
             t->sent_local_candidates, t->local_candidates,
@@ -679,7 +681,8 @@ void webrtc_transport_tick(WebRtcTransport *t, NvstSignal *signal)
             (unsigned long)t->checks_sent, (unsigned long)t->checks_attempted,
             (unsigned long)t->send_failures, t->last_send_errno,
             (unsigned long)t->udp_received, (unsigned long)t->stun_received,
-            (unsigned long)t->valid_responses, t->rtt_ms);
+            (unsigned long)t->valid_responses, t->rtt_ms,
+            (unsigned long)peer_connection_get_video_hold_ms(t->peer));
     }
     if (t->state != WEBRTC_CONNECTED) return;
     PeerConnection *pc = t->peer;

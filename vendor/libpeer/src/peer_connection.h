@@ -226,6 +226,11 @@ int peer_connection_get_ice_candidate_pair_stats(PeerConnection* pc,
 
 int peer_connection_get_rtt_ms(PeerConnection* pc);
 
+/* Upper limit for how long a video gap waits for its retransmission. The
+ * wait itself follows the measured round trip (at least 150 ms). */
+void peer_connection_set_max_video_hold_ms(PeerConnection* pc, uint32_t max_ms);
+uint32_t peer_connection_get_video_hold_ms(PeerConnection* pc);
+
 int peer_connection_get_udp_fd(PeerConnection* pc);
 
 uint32_t peer_connection_get_video_rtx_recovered(PeerConnection* pc);

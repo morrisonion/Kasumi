@@ -160,6 +160,10 @@ click, D-Pad direction, or nothing. Only that game uses the mapping.
 
 - **Choppy picture?** Move closer to the router, or set Bitrate to
   *Steady 1 Mbps* (Settings, or just for one game in its Options).
+- **Phone hotspot or far from the router?** Set Settings > Network >
+  *Connection type* to **Weak / hotspot**: a steadier, slightly softer picture
+  that copes with mobile data. *Server* on Auto picks the GeForce NOW server
+  with the lowest ping from wherever you are.
 - **Small text?** Use ZOOM and drag the map; save the spot as a zoom zone.
 - **Gyro:** *While aiming* only steers while ZL is held, which suits most
   shooters.

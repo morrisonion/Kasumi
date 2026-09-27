@@ -14,6 +14,7 @@
 #include "zoom_zones.h"
 #include "remote_keyboard.h"
 #include "stream_profile.h"
+#include "regions.h"
 
 /* ---- Shared geometry (drawing and hit-testing use the same rects) -------- */
 
@@ -194,8 +195,11 @@ static const SettingEntry SETTING_ENTRIES[] = {
     { SETTING_MENU_AUDIO, NULL, NULL },
     { -1, "外観", "APPEARANCE" },
     { SETTING_THEME, NULL, NULL },
-    { -1, "本体", "SYSTEM" },
+    { -1, "接続", "NETWORK" },
     { SETTING_CONNECTION, NULL, NULL },
+    { SETTING_NETWORK, NULL, NULL },
+    { SETTING_SERVER, NULL, NULL },
+    { -1, "本体", "SYSTEM" },
     { SETTING_LID, NULL, NULL },
     { SETTING_POINTER, NULL, NULL },
     { SETTING_GUIDE, NULL, NULL },
@@ -228,6 +232,7 @@ static const char *const SETTING_LABELS[SETTING_COUNT] = {
     [SETTING_THEME] = "Theme", [SETTING_VOLUME] = "Stream volume",
     [SETTING_MENU_AUDIO] = "Audio in menus", [SETTING_LID] = "Closing the lid",
     [SETTING_CONNECTION] = "Connection check", [SETTING_GUIDE] = "Getting started",
+    [SETTING_NETWORK] = "Connection type", [SETTING_SERVER] = "Server",
     [SETTING_UPDATES] = "Software update", [SETTING_AUTO_UPDATE] = "Check automatically",
     [SETTING_UPDATE_CHANNEL] = "Update channel",
 };
@@ -241,6 +246,7 @@ static const char *const SETTING_JP[SETTING_COUNT] = {
     [SETTING_THEME] = "色", [SETTING_VOLUME] = "音量",
     [SETTING_MENU_AUDIO] = "メニュー音", [SETTING_LID] = "スリープ",
     [SETTING_CONNECTION] = "接続", [SETTING_GUIDE] = "案内",
+    [SETTING_NETWORK] = "回線", [SETTING_SERVER] = "サーバー",
     [SETTING_UPDATES] = "更新", [SETTING_AUTO_UPDATE] = "自動確認",
     [SETTING_UPDATE_CHANNEL] = "チャンネル",
 };
@@ -270,6 +276,26 @@ static const char *gyro_mode_name(GfnGyroMode mode)
     return mode == GFN_GYRO_ALWAYS ? "Always" : mode == GFN_GYRO_WHILE_AIMING ? "While aiming" : "Off";
 }
 
+/* Server choices: 0 Auto, 1 NVIDIA's pick, then the listed regions. */
+static unsigned server_index(const AppSettings *s)
+{
+    if (!s->server[0]) return 0;
+    if (!strcmp(s->server, REGION_CHOICE_NVIDIA)) return 1;
+    const unsigned count = regions_count();
+    Region region;
+    for (unsigned i = 0; i < count; ++i)
+        if (regions_get(i, &region) && !strcmp(region.name, s->server)) return 2 + i;
+    return 0;
+}
+
+static void set_server_index(AppSettings *s, unsigned index)
+{
+    Region region;
+    if (index == 0) s->server[0] = '\0';
+    else if (index == 1) snprintf(s->server, sizeof(s->server), "%s", REGION_CHOICE_NVIDIA);
+    else if (regions_get(index - 2, &region)) snprintf(s->server, sizeof(s->server), "%s", region.name);
+}
+
 /* Current option and option count, for the dot indicator. */
 static unsigned setting_option(const App *app, int setting, unsigned *count)
 {
@@ -290,6 +316,8 @@ static unsigned setting_option(const App *app, int setting, unsigned *count)
     case SETTING_VOLUME: *count = 6; return s->volume;
     case SETTING_MENU_AUDIO: *count = 2; return s->mute_in_menus ? 1 : 0;
     case SETTING_LID: *count = LID_MODE_COUNT; return s->lid_mode;
+    case SETTING_NETWORK: *count = 2; return s->net_weak ? 1 : 0;
+    case SETTING_SERVER: *count = 2 + regions_count(); return server_index(s);
     case SETTING_AUTO_UPDATE: *count = 2; return s->auto_update ? 0 : 1;
     case SETTING_UPDATE_CHANNEL: *count = 2; return s->update_beta ? 1 : 0;
     default: *count = 0; return 0;
@@ -332,6 +360,25 @@ static const char *setting_value(const App *app, int setting)
         snprintf(result, sizeof(result), "%u ms · %u.%u Mbps", c->conn_latency_ms,
                  c->conn_kbps / 1000, c->conn_kbps % 1000 / 100);
         return result;
+    }
+    case SETTING_NETWORK: return s->net_weak ? "Weak / hotspot" : "Standard";
+    case SETTING_SERVER: {
+        static char text[72];
+        Region region;
+        const unsigned index = server_index(s);
+        if (index == 1) return "NVIDIA picks";
+        if (index == 0) {
+            const int best = regions_fastest();
+            if (best >= 0 && regions_get((unsigned)best, &region))
+                snprintf(text, sizeof(text), "Auto · %s", region.name);
+            else
+                snprintf(text, sizeof(text), "Auto (lowest ping)");
+            return text;
+        }
+        if (!regions_get(index - 2, &region)) return s->server;
+        if (region.ms >= 0) snprintf(text, sizeof(text), "%s · %d ms", region.name, region.ms);
+        else snprintf(text, sizeof(text), "%s", region.name);
+        return text;
     }
     case SETTING_GUIDE: return "Open";
     case SETTING_UPDATES: {
@@ -401,11 +448,23 @@ static const char *setting_description(const App *app, int setting)
             ? "Game audio goes quiet while the stream menu or controls sheet is open."
             : "Game audio keeps playing while the stream menu is open.";
     case SETTING_CONNECTION: return connection_advice(app->client);
+    case SETTING_NETWORK:
+        return s->net_weak
+            ? "For far-away Wi-Fi or a phone hotspot: a steadier 0.6-1 Mbps picture, a longer wait for lost packets and a bigger buffer. Softer image, a little more delay. Next launch."
+            : "For home Wi-Fi near the router: the sharpest picture and lowest delay. Next launch.";
+    case SETTING_SERVER: {
+        const unsigned index = server_index(s);
+        if (index == 0)
+            return "Kasumi pings every GeForce NOW server and uses the fastest, measured again on each new Wi-Fi network (like a phone hotspot).";
+        if (index == 1)
+            return "NVIDIA chooses from your internet address. On mobile data that can be a far-away server.";
+        return "Always use this server. Your ping and queue depend on it; run Connection check to see ping to each one.";
+    }
     case SETTING_GUIDE: return "Walk through the basics again: signing in, controls, picture and extras.";
     case SETTING_UPDATES:
         return "See what's new and install the latest Kasumi from GitHub. Your login, library and settings stay.";
     case SETTING_AUTO_UPDATE:
-        return s->auto_update ? "Kasumi looks for a new version about twice a day, only in the menus, never while you play."
+        return s->auto_update ? "Kasumi looks for a new version every few hours, only in the menus, never while you play."
                               : "Kasumi only looks for updates when you open Software update.";
     case SETTING_UPDATE_CHANNEL:
         return s->update_beta ? "Beta: get test versions first. They may have rough edges."
@@ -448,6 +507,12 @@ void screens_setting_change(App *app, int setting, int direction)
     case SETTING_VOLUME: s->volume = (s->volume + 6 + step) % 6; break;
     case SETTING_MENU_AUDIO: s->mute_in_menus = !s->mute_in_menus; break;
     case SETTING_LID: s->lid_mode = (s->lid_mode + LID_MODE_COUNT + step) % LID_MODE_COUNT; break;
+    case SETTING_NETWORK: s->net_weak = !s->net_weak; break;
+    case SETTING_SERVER: {
+        const unsigned count = 2 + regions_count();
+        set_server_index(s, (server_index(s) + (step < 0 ? count - 1 : 1)) % count);
+        break;
+    }
     case SETTING_AUTO_UPDATE: s->auto_update = !s->auto_update; break;
     case SETTING_UPDATE_CHANNEL: s->update_beta = !s->update_beta; break;
     case SETTING_BITRATE:
@@ -1057,10 +1122,19 @@ static const char *option_value(const App *app, const GamePrefs *prefs, int row,
 /* What the last connection check means for play. */
 static const char *connection_advice(const GfnClient *c)
 {
-    if (!c->conn_tested_at) return "Measures Wi-Fi, latency and speed to NVIDIA.";
-    if (c->conn_bars < 2 || c->conn_kbps < 2000) return "Weak link: choose Steady 1 Mbps for this game.";
-    if (c->conn_latency_ms > 150) return "High latency: expect some input lag.";
-    return "Good connection: Adaptive should run smoothly.";
+    static char text[160];
+    if (!c->conn_tested_at) return "Measures Wi-Fi, latency and speed to NVIDIA, and pings every server.";
+    const char *advice = c->conn_bars < 2 || c->conn_kbps < 2000
+        ? "Weak link: set Connection type to Weak / hotspot."
+        : c->conn_latency_ms > 150 ? "High latency: expect some input lag; Weak / hotspot may help."
+                                   : "Good connection: Standard should run smoothly.";
+    const int best = regions_fastest();
+    Region region;
+    if (best >= 0 && regions_get((unsigned)best, &region))
+        snprintf(text, sizeof(text), "%s Fastest server: %s, %d ms.", advice, region.name, region.ms);
+    else
+        snprintf(text, sizeof(text), "%s", advice);
+    return text;
 }
 
 static void draw_options_sheet(const App *app, float p)

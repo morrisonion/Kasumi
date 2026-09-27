@@ -7,6 +7,7 @@
 #include "diagnostic.h"
 #include "http_client.h"
 #include "game_art.h"
+#include "regions.h"
 #include "updater.h"
 
 #define WORKER_STACK_SIZE (128 * 1024)
@@ -50,7 +51,22 @@ static bool run_job(NetJobKind kind, const char *text, const GfnGame *game)
         if (!gfn_fetch_library(&g_work)) return false;
         game_art_prefetch(g_work.games, (unsigned)g_work.game_count);
         return true;
-    case NET_JOB_CONNECTION_TEST: return gfn_connection_test(&g_work);
+    case NET_JOB_CONNECTION_TEST: {
+        const bool ok = gfn_connection_test(&g_work);
+        if (ok) {
+            snprintf(g_work.status, sizeof(g_work.status), "Pinging GeForce NOW servers...");
+            publish();
+            regions_update();
+            regions_measure();
+            const int best = regions_fastest();
+            Region region;
+            if (best >= 0 && regions_get((unsigned)best, &region))
+                snprintf(g_work.status, sizeof(g_work.status), "Connection: %u ms, %u.%u Mbps; fastest server %s %d ms",
+                         g_work.conn_latency_ms, g_work.conn_kbps / 1000, g_work.conn_kbps % 1000 / 100,
+                         region.name, region.ms);
+        }
+        return ok;
+    }
     case NET_JOB_UPDATE_CHECK: return updater_check(!strcmp(text, "beta"));
     case NET_JOB_UPDATE_INSTALL: return updater_install();
     case NET_JOB_LIBRARY_CACHED:

@@ -136,6 +136,8 @@ struct RtpDecoder {
   uint8_t reorder_has_expected_sequence;
   uint8_t reorder_gap_active;
   uint32_t reorder_gap_started_ms;
+  /* How long a gap may wait for its retransmission; 0 = the default. */
+  uint32_t max_hold_ms;
   uint32_t reorder_buffered_packets;
   uint32_t reordered_packets;
   uint32_t late_packets_dropped;
