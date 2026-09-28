@@ -93,16 +93,23 @@ body:
       label: Game (if it happened while playing)
       placeholder: "Genshin Impact"
 
+  - type: input
+    id: report
+    attributes:
+      label: Report code
+      description: |
+        Easiest: in Kasumi, open Settings > System > Send diagnostic report and paste the code it shows here.
+        It includes the logs of this run and the one before, so it works even after a crash.
+      placeholder: "K7F-2QX"
+
   - type: textarea
     id: log
     attributes:
-      label: Diagnostic log
+      label: Diagnostic log (if you didn't send a report)
       description: |
         Attach `sdmc:/3ds/kasumi/kasumi-diagnostic.txt` from the SD card (drag the file into this box).
-        It is rewritten every time Kasumi starts, so copy it before opening Kasumi again.
+        The run before is kept as `kasumi-diagnostic-previous.txt`: after a crash or freeze, attach that one too.
         After a crash, also attach the newest file from `sdmc:/luma/dumps/arm11/`.
-    validations:
-      required: true
 
   - type: textarea
     id: extra

@@ -27,7 +27,9 @@ typedef enum {
     /* Text "beta" includes pre-releases. */
     NET_JOB_UPDATE_CHECK,
     NET_JOB_UPDATE_INSTALL,
-    NET_JOB_RESUME_CHECK
+    NET_JOB_RESUME_CHECK,
+    /* Opt-in diagnostic report (report.h). */
+    NET_JOB_SEND_REPORT
 } NetJobKind;
 
 typedef struct {

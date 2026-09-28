@@ -16,6 +16,8 @@ typedef enum {
 } DeadzoneLevel;
 
 enum { LID_PAUSE, LID_SLEEP, LID_KEEP_PLAYING, LID_MODE_COUNT };
+/* Automatic diagnostic reports: not asked yet, yes, or no. */
+enum { SHARE_ASK, SHARE_YES, SHARE_NO };
 
 typedef struct {
     GfnButtonLayout button_layout;
@@ -47,6 +49,11 @@ typedef struct {
     bool net_weak;
     /* GeForce NOW server: "" auto (lowest ping), "nvidia", or a region name. */
     char server[40];
+    /* Send a report automatically when something goes wrong (SHARE_*). */
+    unsigned share_reports;
+    /* Random, made on this console: tells reports from one console apart.
+     * Not linked to the NVIDIA account. */
+    char install_id[20];
     /* The first-run guide was finished or skipped. */
     bool guide_done;
     /* Look for updates once or twice a day; include pre-releases (beta). */

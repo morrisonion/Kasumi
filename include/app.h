@@ -27,7 +27,12 @@ typedef enum {
     MODAL_SIGN_OUT,
     MODAL_ERROR,
     /* A game found still running at start-up: resume it or end it. */
-    MODAL_RESUME
+    MODAL_RESUME,
+    /* Opt-in diagnostic report: what is sent, then the code to share. */
+    MODAL_SEND_REPORT,
+    MODAL_REPORT_SENT,
+    /* Asked once: send reports automatically when something goes wrong? */
+    MODAL_SHARE_ASK
 } AppModal;
 
 typedef enum {
@@ -89,7 +94,7 @@ enum { SETTING_LAYOUT, SETTING_TRIGGERS, SETTING_DEADZONE, SETTING_POINTER,
        SETTING_STATS, SETTING_FAST_INPUT, SETTING_RESOLUTION, SETTING_BITRATE,
        SETTING_FILTER, SETTING_GYRO, SETTING_GYRO_SPEED,
        SETTING_THEME, SETTING_VOLUME, SETTING_MENU_AUDIO, SETTING_LID,
-       SETTING_CONNECTION, SETTING_NETWORK, SETTING_SERVER, SETTING_GUIDE,
+       SETTING_CONNECTION, SETTING_NETWORK, SETTING_SERVER, SETTING_GUIDE, SETTING_REPORT, SETTING_SHARE,
        SETTING_UPDATES, SETTING_AUTO_UPDATE, SETTING_UPDATE_CHANNEL,
        SETTING_ACCOUNT, SETTING_COUNT };
 
@@ -143,6 +148,8 @@ typedef struct {
     char modal_title[48];
     char modal_jp[24];
     char modal_text[192];
+    /* The code of the diagnostic report just sent ("K7F-2QX"). */
+    char report_code[16];
 
     size_t selected;
     size_t list_top;

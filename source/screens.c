@@ -15,6 +15,7 @@
 #include "remote_keyboard.h"
 #include "stream_profile.h"
 #include "regions.h"
+#include "report.h"
 
 /* ---- Shared geometry (drawing and hit-testing use the same rects) -------- */
 
@@ -203,6 +204,8 @@ static const SettingEntry SETTING_ENTRIES[] = {
     { SETTING_LID, NULL, NULL },
     { SETTING_POINTER, NULL, NULL },
     { SETTING_GUIDE, NULL, NULL },
+    { SETTING_SHARE, NULL, NULL },
+    { SETTING_REPORT, NULL, NULL },
     { -1, "更新", "UPDATES" },
     { SETTING_UPDATES, NULL, NULL },
     { SETTING_AUTO_UPDATE, NULL, NULL },
@@ -233,6 +236,7 @@ static const char *const SETTING_LABELS[SETTING_COUNT] = {
     [SETTING_MENU_AUDIO] = "Audio in menus", [SETTING_LID] = "Closing the lid",
     [SETTING_CONNECTION] = "Connection check", [SETTING_GUIDE] = "Getting started",
     [SETTING_NETWORK] = "Connection type", [SETTING_SERVER] = "Server",
+    [SETTING_REPORT] = "Send diagnostic report", [SETTING_SHARE] = "Share diagnostics",
     [SETTING_UPDATES] = "Software update", [SETTING_AUTO_UPDATE] = "Check automatically",
     [SETTING_UPDATE_CHANNEL] = "Update channel",
 };
@@ -247,6 +251,7 @@ static const char *const SETTING_JP[SETTING_COUNT] = {
     [SETTING_MENU_AUDIO] = "メニュー音", [SETTING_LID] = "スリープ",
     [SETTING_CONNECTION] = "接続", [SETTING_GUIDE] = "案内",
     [SETTING_NETWORK] = "回線", [SETTING_SERVER] = "サーバー",
+    [SETTING_REPORT] = "報告", [SETTING_SHARE] = "協力",
     [SETTING_UPDATES] = "更新", [SETTING_AUTO_UPDATE] = "自動確認",
     [SETTING_UPDATE_CHANNEL] = "チャンネル",
 };
@@ -317,6 +322,7 @@ static unsigned setting_option(const App *app, int setting, unsigned *count)
     case SETTING_MENU_AUDIO: *count = 2; return s->mute_in_menus ? 1 : 0;
     case SETTING_LID: *count = LID_MODE_COUNT; return s->lid_mode;
     case SETTING_NETWORK: *count = 2; return s->net_weak ? 1 : 0;
+    case SETTING_SHARE: *count = 2; return s->share_reports == SHARE_YES ? 0 : 1;
     case SETTING_SERVER: *count = 2 + regions_count(); return server_index(s);
     case SETTING_AUTO_UPDATE: *count = 2; return s->auto_update ? 0 : 1;
     case SETTING_UPDATE_CHANNEL: *count = 2; return s->update_beta ? 1 : 0;
@@ -381,6 +387,8 @@ static const char *setting_value(const App *app, int setting)
         return text;
     }
     case SETTING_GUIDE: return "Open";
+    case SETTING_REPORT: return report_available() ? "Send" : "Unavailable";
+    case SETTING_SHARE: return s->share_reports == SHARE_YES ? "On" : "Off";
     case SETTING_UPDATES: {
         static char text[48];
         const UpdateInfo info = updater_info();
@@ -461,6 +469,12 @@ static const char *setting_description(const App *app, int setting)
         return "Always use this server. Your ping and queue depend on it; run Connection check to see ping to each one.";
     }
     case SETTING_GUIDE: return "Walk through the basics again: signing in, controls, picture and extras.";
+    case SETTING_SHARE:
+        return s->share_reports == SHARE_YES
+            ? "When something goes wrong (a crash, freeze or failed stream), Kasumi sends its log to the developer on its own, at most once per run. No login or passwords."
+            : "Kasumi never sends anything on its own. Turn on to send the log automatically when something goes wrong, which helps fix bugs faster.";
+    case SETTING_REPORT:
+        return "Having a problem? Send this run's and the last run's log to Kasumi's developer and get a code to share. Only when you choose; nothing is sent otherwise.";
     case SETTING_UPDATES:
         return "See what's new and install the latest Kasumi from GitHub. Your login, library and settings stay.";
     case SETTING_AUTO_UPDATE:
@@ -508,6 +522,7 @@ void screens_setting_change(App *app, int setting, int direction)
     case SETTING_MENU_AUDIO: s->mute_in_menus = !s->mute_in_menus; break;
     case SETTING_LID: s->lid_mode = (s->lid_mode + LID_MODE_COUNT + step) % LID_MODE_COUNT; break;
     case SETTING_NETWORK: s->net_weak = !s->net_weak; break;
+    case SETTING_SHARE: s->share_reports = s->share_reports == SHARE_YES ? SHARE_NO : SHARE_YES; break;
     case SETTING_SERVER: {
         const unsigned count = 2 + regions_count();
         set_server_index(s, (server_index(s) + (step < 0 ? count - 1 : 1)) % count);
@@ -1008,17 +1023,57 @@ static void draw_settings_top(const App *app, bool entering)
     draw_footer(UI_TOP_WIDTH, hints);
 }
 
+/* "Help improve Kasumi?": asked once, after an update or the first start. */
+static void draw_share_ask_top(float p)
+{
+    ui_rect(0, 26, UI_TOP_WIDTH, 214, ui_with_alpha(UI_BG, (u8)(0xE0 * p)));
+    ui_offset(0.0f, (1.0f - p) * 10.0f);
+    const UiRect panel = { 36, 36, 328, 176 };
+    draw_card(panel, p);
+    ui_enso(200, 66, 20, ui_with_alpha(UI_ACCENT, (u8)(0xFF * p)));
+    ui_text(200, 55, 18, UI_ACCENT, UI_ALIGN_CENTER, "協");
+    draw_title(200, 92, "協力のお願い", "HELP IMPROVE KASUMI?");
+    ui_text_wrap(200, 118, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, 300, 2, 14,
+                 "When something goes wrong, Kasumi can send its log to the developer on its own.");
+    static const char *const points[3] = {
+        "Only after a crash, freeze or failed stream",
+        "Never your login · IP addresses shortened",
+        "Kept 30 days · change it in Settings > System",
+    };
+    for (int i = 0; i < 3; ++i) {
+        const float y = 150 + i * 15.0f;
+        ui_rounded(76, y + 5, 4, 4, 2.0f, UI_ACCENT);
+        ui_text(86, y, 11, UI_TEXT, UI_ALIGN_LEFT, points[i]);
+    }
+    static const char *const hints[] = { "A", "Share", "B", "No thanks", NULL };
+    ui_hint_row(200, 200, hints);
+    ui_offset(0.0f, 0.0f);
+}
+
 static void draw_modal_top(const App *app, float p)
 {
+    if (app->modal == MODAL_SHARE_ASK) {
+        draw_share_ask_top(p);
+        return;
+    }
     ui_rect(0, 26, UI_TOP_WIDTH, 214, ui_with_alpha(UI_BG, (u8)(0xC8 * p)));
     ui_offset(0.0f, (1.0f - p) * 10.0f);
     const UiRect panel = { 60, 56, 280, 128 };
     draw_card(panel, p);
     draw_title(200, 66, app->modal_jp, app->modal_title);
-    ui_text_wrap(200, 98, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, 250, 4, 14, app->modal_text);
+    if (app->modal == MODAL_REPORT_SENT) {
+        /* The code is what the player writes down: make it big. */
+        ui_text(200, 92, 26, UI_ACCENT, UI_ALIGN_CENTER, app->report_code);
+        ui_text_wrap(200, 126, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, 250, 2, 14, app->modal_text);
+    } else {
+        ui_text_wrap(200, 98, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, 250, 4, 14, app->modal_text);
+    }
     static const char *const confirm[] = { "A", "Confirm", "B", "Cancel", NULL };
     static const char *const error[] = { "A", "Retry", "B", "Back", NULL };
-    ui_hint_row(200, 162, app->modal == MODAL_ERROR ? error : confirm);
+    static const char *const send[] = { "A", "Send", "B", "Cancel", NULL };
+    static const char *const done[] = { "A", "OK", NULL };
+    ui_hint_row(200, 162, app->modal == MODAL_ERROR ? error : app->modal == MODAL_SEND_REPORT ? send :
+                          app->modal == MODAL_REPORT_SENT ? done : confirm);
     ui_offset(0.0f, 0.0f);
 }
 
@@ -2128,11 +2183,20 @@ static void draw_modal_bottom(const App *app, float p)
     ui_text(160, 68, 12, UI_ACCENT, UI_ALIGN_CENTER, app->modal_jp);
     ui_label(160, 84, 11, UI_TEXT, UI_ALIGN_CENTER, app->modal_title);
     const bool error = app->modal == MODAL_ERROR, resume = app->modal == MODAL_RESUME;
-    ui_button(MODAL_LEFT, resume ? "RESUME" : error ? "RETRY" : "YES", resume ? "再開" : error ? "再試行" : "はい",
+    if (app->modal == MODAL_REPORT_SENT) {
+        ui_text(160, 104, 22, UI_TEXT, UI_ALIGN_CENTER, app->report_code);
+        ui_button(MODAL_LEFT, "OK", "了解", UI_BUTTON_PRIMARY, pressed(app, MODAL_LEFT));
+        ui_offset(0.0f, 0.0f);
+        return;
+    }
+    const bool send = app->modal == MODAL_SEND_REPORT, share = app->modal == MODAL_SHARE_ASK;
+    ui_button(MODAL_LEFT, resume ? "RESUME" : error ? "RETRY" : send ? "SEND" : share ? "SHARE" : "YES",
+              resume ? "再開" : error ? "再試行" : send ? "送信" : share ? "協力" : "はい",
               app->modal == MODAL_EXIT || app->modal == MODAL_SIGN_OUT ? UI_BUTTON_DANGER
                                                                          : UI_BUTTON_PRIMARY,
               pressed(app, MODAL_LEFT));
-    ui_button(MODAL_RIGHT, resume ? "END GAME" : error ? "BACK" : "NO", resume ? "終了" : error ? "戻る" : "いいえ",
+    ui_button(MODAL_RIGHT, resume ? "END GAME" : error ? "BACK" : send ? "CANCEL" : share ? "NO THANKS" : "NO",
+              resume ? "終了" : error ? "戻る" : send ? "取消" : share ? "不要" : "いいえ",
               resume ? UI_BUTTON_DANGER : UI_BUTTON_NORMAL, pressed(app, MODAL_RIGHT));
     ui_offset(0.0f, 0.0f);
 }
@@ -2214,7 +2278,7 @@ AppAction screens_touch(const App *app, int x, int y)
     }
     if (app->modal != MODAL_NONE) {
         if (ui_hit(MODAL_LEFT, x, y)) return app->modal == MODAL_ERROR ? ACTION_RETRY : ACTION_CONFIRM;
-        if (ui_hit(MODAL_RIGHT, x, y)) return ACTION_DISMISS;
+        if (app->modal != MODAL_REPORT_SENT && ui_hit(MODAL_RIGHT, x, y)) return ACTION_DISMISS;
         return ACTION_NONE;
     }
     switch (app->view) {

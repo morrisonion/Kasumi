@@ -8,6 +8,7 @@
 #include "http_client.h"
 #include "game_art.h"
 #include "regions.h"
+#include "report.h"
 #include "updater.h"
 
 #define WORKER_STACK_SIZE (128 * 1024)
@@ -78,6 +79,7 @@ static bool run_job(NetJobKind kind, const char *text, const GfnGame *game)
         gfn_active_save(&g_work, game);
         return true;
     case NET_JOB_RESUME_CHECK: return gfn_resume_check(&g_work);
+    case NET_JOB_SEND_REPORT: return report_send(text);
     case NET_JOB_STOP_SESSION:
         if (gfn_stop_session(&g_work)) return true;
         /* Keep a stuck session visible so the user can try again. */

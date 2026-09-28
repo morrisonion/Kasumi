@@ -250,17 +250,38 @@ navigating launchers, sign-in screens and chat, not for playing.
 ## Privacy
 
 Your login is stored only on your SD card in `sdmc:/3ds/kasumi/gfn-session.json`.
-**Never share that file.** The diagnostic log (`kasumi-diagnostic.txt`)
-excludes tokens and passwords and is safe to attach to bug reports.
+**Never share that file.** The diagnostic logs (`kasumi-diagnostic.txt` and
+`kasumi-diagnostic-previous.txt`) exclude tokens and passwords and are safe to
+attach to bug reports.
+
+Diagnostic reports are opt-in. Kasumi asks once, **"Help improve Kasumi?"**:
+if you choose *Share*, it sends a report on its own when something goes wrong
+(the previous run crashed, froze or lost power, a game failed to launch, or
+the stream could not reconnect), at most once per run and never during a
+game. If you choose *No thanks*, nothing is ever sent unless you use **Send
+diagnostic report** yourself. Change it anytime under Settings > System >
+*Share diagnostics*.
+
+A report holds the logs of this run and the previous one, your
+`settings.json` (including a random install ID made on your console, not
+linked to your NVIDIA account), and the newest Luma crash dump from the last 3
+days. Public IP addresses are shortened to their first two numbers, and your
+login is never included. Reports are kept for 30 days and are only readable by
+the developer. The service's code is in
+[`server/report-worker`](server/report-worker).
 
 ## Reporting problems
 
-[Open a bug report](https://github.com/p0mpurin/Kasumi/issues/new?template=bug_report.yml):
-the form asks for your model, Wi-Fi bars and bitrate, and for
-`sdmc:/3ds/kasumi/kasumi-diagnostic.txt` (copy it before opening Kasumi again;
-each start begins a new log). After a crash, attach the newest Luma dump from
-`sdmc:/luma/dumps/arm11/`. Ideas are welcome as
-[feature requests](https://github.com/p0mpurin/Kasumi/issues/new?template=feature_request.yml).
+The easiest way: in Kasumi, open **Settings > System > Send diagnostic
+report**, then mention the code it shows (like `K7F-2QX`) in your
+[bug report](https://github.com/p0mpurin/Kasumi/issues/new?template=bug_report.yml)
+or message. Kasumi keeps the log of the previous run too, so this works even
+after a crash or freeze.
+
+You can also attach the files yourself: `sdmc:/3ds/kasumi/kasumi-diagnostic.txt`
+(this run) and `kasumi-diagnostic-previous.txt` (the run before), plus, after a
+crash, the newest Luma dump from `sdmc:/luma/dumps/arm11/`. Ideas are welcome
+as [feature requests](https://github.com/p0mpurin/Kasumi/issues/new?template=feature_request.yml).
 
 ## Building
 

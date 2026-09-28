@@ -71,6 +71,10 @@ void diagnostic_init(void)
     g_active = 0;
     g_started_ms = osGetTime();
     if (g_file) fclose(g_file);
+    /* Keep the last run's log instead of overwriting it: after a crash or
+     * freeze that is the one worth reading. */
+    remove(DIAGNOSTIC_PREVIOUS_PATH);
+    rename(DIAGNOSTIC_PATH, DIAGNOSTIC_PREVIOUS_PATH);
     g_file = fopen(DIAGNOSTIC_PATH, "w");
     if (!g_file) return;
     fputs(APP_NAME " " APP_VERSION " (build " APP_BUILD ") diagnostic\n", g_file);

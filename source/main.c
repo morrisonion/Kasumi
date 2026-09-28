@@ -16,6 +16,7 @@
 #include "game_prefs.h"
 #include "queue_alert.h"
 #include "regions.h"
+#include "report.h"
 #include "updater.h"
 #include "play_history.h"
 #include "screenshot.h"
@@ -78,6 +79,7 @@ static void shutdown_services(void)
 {
     webrtc_transport_close(&g_transport);
     nvst_signal_close(&g_signal);
+    diagnostic_log("APP", REPORT_CLEAN_EXIT);
     diagnostic_close();
     http_global_exit();
     if (g_soc_ready) socExit();
@@ -573,6 +575,21 @@ static void change_setting(int direction)
         g_app.guide_page = 0;
         return;
     }
+    if (index == SETTING_SHARE) {
+        screens_setting_change(&g_app, index, direction);
+        diagnostic_log("REPORT", "share diagnostics %s", g_app.settings.share_reports == SHARE_YES ? "on" : "off");
+        return;
+    }
+    if (index == SETTING_REPORT) {
+        if (!report_available()) {
+            show_notice("Diagnostic reports are not available in this build");
+            return;
+        }
+        open_modal(MODAL_SEND_REPORT, "報告", "SEND A REPORT?",
+                   "Sends this run's and the last run's diagnostic log, your settings and any recent "
+                   "crash dump to Kasumi's developer. No login or passwords; IP addresses shortened. Kept 30 days.");
+        return;
+    }
     if (index == SETTING_UPDATES) {
         open_updates();
         return;
@@ -659,6 +676,14 @@ static void handle_modal(u32 down, AppAction action)
     if (!confirm && !dismiss) return;
     const AppModal modal = g_app.modal;
     g_app.modal = MODAL_NONE;
+    if (modal == MODAL_SHARE_ASK) {
+        g_app.settings.share_reports = confirm ? SHARE_YES : SHARE_NO;
+        diagnostic_log("REPORT", "share diagnostics answered %s", confirm ? "yes" : "no");
+        save_settings();
+        show_notice(confirm ? "Thank you! Change it anytime in Settings > System"
+                            : "Nothing will be sent. Change it anytime in Settings > System");
+        return;
+    }
     if (modal == MODAL_RESUME) {
         if (confirm) {
             /* The rig is already ours: set the game up and let signalling
@@ -675,6 +700,10 @@ static void handle_modal(u32 down, AppAction action)
         return;
     }
     if (dismiss) return;
+    if (modal == MODAL_SEND_REPORT) {
+        submit_job(NET_JOB_SEND_REPORT, "Sending diagnostic report...", NULL, NULL);
+        return;
+    }
     if (modal == MODAL_EXIT) {
         g_quit = true;
     } else if (modal == MODAL_SIGN_OUT) {
@@ -1153,6 +1182,7 @@ static void handle_stream(u32 down, u32 held, AppAction action, bool touch_down,
 }
 
 static const char *current_status(void);
+static void queue_auto_report(const char *trigger);
 
 /* ---- Session tracking ------------------------------------------------------ */
 
@@ -1400,6 +1430,7 @@ static void track_session(void)
      * reconnecting cannot work. Say so; Retry starts the game again. */
     if (session_gone()) {
         diagnostic_log("APP", "session ended on NVIDIA's side (HTTP %d); not reconnecting", g_signal.upgrade_http);
+        queue_auto_report("session-ended");
         g_app.reconnect_attempt = 4;
         return;
     }
@@ -1430,7 +1461,10 @@ static void track_session(void)
     if (reconnect_at && now - reconnect_at < 2500 && g_app.reconnect_attempt) return;
     if (g_app.reconnect_attempt == 3) {
         /* Three tries failed: hand the choice back to the player. */
-        if (now - reconnect_at >= 8000) g_app.reconnect_attempt = 4;
+        if (now - reconnect_at >= 8000) {
+            g_app.reconnect_attempt = 4;
+            queue_auto_report("reconnect-failed");
+        }
         return;
     }
     reconnect_at = now;
@@ -1658,6 +1692,44 @@ static const char *current_status(void)
     return g_client.status;
 }
 
+/* ---- Diagnostic reports ---------------------------------------------------- */
+
+/* Automatic reports (Share diagnostics on): one per run, sent from the menus
+ * once nothing else is happening, never during a game. */
+static const char *g_auto_trigger;
+static bool g_auto_sent, g_auto_inflight;
+
+static void queue_auto_report(const char *trigger)
+{
+    if (g_auto_sent || g_auto_trigger || !report_available()) return;
+    g_auto_trigger = trigger;
+    diagnostic_log("REPORT", "automatic report queued (%s)", trigger);
+}
+
+static void auto_report_tick(void)
+{
+    if (!g_auto_trigger || g_auto_sent || g_app.settings.share_reports != SHARE_YES) return;
+    if ((g_app.view != VIEW_LIBRARY && g_app.view != VIEW_WELCOME) || gfn_session_active(&g_client) ||
+        net_worker_busy() || g_app.modal != MODAL_NONE)
+        return;
+    if (submit_job(NET_JOB_SEND_REPORT, NULL, g_auto_trigger, NULL)) {
+        g_auto_sent = g_auto_inflight = true;
+        g_auto_trigger = NULL;
+    }
+}
+
+/* Asked once per console, when the menus are quiet. */
+static void share_prompt_tick(void)
+{
+    static bool asked;
+    if (asked || g_app.settings.share_reports != SHARE_ASK || !report_available()) return;
+    if ((g_app.view != VIEW_LIBRARY && g_app.view != VIEW_WELCOME) || g_app.whats_new_open ||
+        g_app.guide_page >= 0 || g_app.update_open || g_app.modal != MODAL_NONE || g_app.busy)
+        return;
+    asked = true;
+    open_modal(MODAL_SHARE_ASK, "協力", "HELP IMPROVE KASUMI?", "");
+}
+
 /* React to a worker job that just finished. */
 static void finish_jobs(void)
 {
@@ -1670,6 +1742,7 @@ static void finish_jobs(void)
     } else if ((result.kind == NET_JOB_START_SESSION || result.kind == NET_JOB_RESTART_SESSION) &&
                !result.ok) {
         open_modal(MODAL_ERROR, "起動失敗", "LAUNCH FAILED", g_client.status);
+        queue_auto_report("launch-failed");
     }
     if (result.kind == NET_JOB_LOAD_LIBRARY || result.kind == NET_JOB_SEARCH)
         g_app.selected = g_app.list_top = 0;
@@ -1679,6 +1752,24 @@ static void finish_jobs(void)
                  g_client.resume_game.title[0] ? g_client.resume_game.title : "Your game");
         g_current_game = g_client.resume_game;
         open_modal(MODAL_RESUME, "再開", "RESUME YOUR GAME?", text);
+    }
+    if (result.kind == NET_JOB_SEND_REPORT && g_auto_inflight) {
+        g_auto_inflight = false;
+        if (result.ok) {
+            char text[64];
+            snprintf(text, sizeof(text), "Diagnostic report sent · %s", report_code());
+            show_notice(text);
+        }
+    } else if (result.kind == NET_JOB_SEND_REPORT && !result.cancelled) {
+        if (result.ok) {
+            snprintf(g_app.report_code, sizeof(g_app.report_code), "%s", report_code());
+            open_modal(MODAL_REPORT_SENT, "送信完了", "REPORT SENT",
+                       "Share this code in your GitHub issue or message so the developer can find your report.");
+        } else {
+            char text[96];
+            snprintf(text, sizeof(text), "Report not sent: %.70s", report_error());
+            show_notice(text);
+        }
     }
     if (result.kind == NET_JOB_UPDATE_CHECK) {
         const UpdateInfo info = updater_info();
@@ -1740,6 +1831,13 @@ int main(int argc, char **argv)
     game_art_init();
     regions_load();
     settings_load(&g_app.settings);
+    if (!g_app.settings.install_id[0]) {
+        /* Anonymous: random, made here, not linked to any account. */
+        srand((unsigned)(svcGetSystemTick() ^ osGetTime()));
+        snprintf(g_app.settings.install_id, sizeof(g_app.settings.install_id), "%04x%04x%04x",
+                 rand() & 0xFFFF, rand() & 0xFFFF, rand() & 0xFFFF);
+        settings_save(&g_app.settings);
+    }
     g_app.guide_page = g_app.settings.guide_done ? -1 : 0;
     settings_apply_input(&g_app.settings);
     settings_apply_picture(&g_app.settings);
@@ -1770,6 +1868,11 @@ int main(int argc, char **argv)
     diagnostic_log("APP", "startup model=%s wifiBars=%u linearFreeKiB=%lu",
                    is_new_3ds ? "new3ds-family" : "old3ds-family",
                    osGetWifiStrength(), (unsigned long)(linearSpaceFree() / 1024));
+    /* The last run of this version never reached a normal exit. */
+    if (report_previous_run_unclean()) {
+        diagnostic_log("APP", "previous run did not exit cleanly");
+        queue_auto_report("unclean-exit");
+    }
     nvst_signal_init(&g_signal);
     webrtc_transport_init(&g_transport);
     gfn_client_init(&g_client);
@@ -1844,7 +1947,11 @@ int main(int argc, char **argv)
 
         if (g_app.view == VIEW_LIBRARY || g_app.view == VIEW_DETAILS) rebuild_list();
         const AppAction action = touch_down ? screens_touch(&g_app, touch.px, touch.py) : ACTION_NONE;
-        if (g_app.view != VIEW_STREAM) auto_update_check();
+        if (g_app.view != VIEW_STREAM) {
+            auto_update_check();
+            share_prompt_tick();
+            auto_report_tick();
+        }
         if (g_app.whats_new_open && g_app.view != VIEW_STREAM) {
             handle_whats_new(down, repeat, action);
         } else if (g_app.guide_page >= 0 && g_app.view != VIEW_STREAM && !g_app.busy) {
