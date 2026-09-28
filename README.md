@@ -254,13 +254,20 @@ Your login is stored only on your SD card in `sdmc:/3ds/kasumi/gfn-session.json`
 `kasumi-diagnostic-previous.txt`) exclude tokens and passwords and are safe to
 attach to bug reports.
 
-Diagnostic reports are opt-in. Kasumi asks once, **"Help improve Kasumi?"**:
-if you choose *Share*, it sends a report on its own when something goes wrong
-(the previous run crashed, froze or lost power, a game failed to launch, or
-the stream could not reconnect), at most once per run and never during a
-game. If you choose *No thanks*, nothing is ever sent unless you use **Send
-diagnostic report** yourself. Change it anytime under Settings > System >
-*Share diagnostics*.
+Sharing diagnostics is opt-in. Kasumi asks once, **"Help improve Kasumi?"**.
+If you choose *Share*, it sends two things:
+
+- **Problem reports**: the log, on its own when something goes wrong (the
+  previous run crashed, froze or lost power, a game failed to launch, or the
+  stream could not reconnect), at most once per run and never during a game.
+- **Performance stats**: after each session of 30 seconds or more, a few
+  anonymous numbers (session length, game, server, ping, bitrate, frame rate,
+  lost and repeated frames, reconnects, decode time). No log text, no
+  addresses. Kept 90 days.
+
+If you choose *No thanks*, nothing is ever sent unless you use **Send
+diagnostic report** yourself. Change either one anytime under Settings >
+System (*Share problem reports*, *Share performance stats*).
 
 A report holds the logs of this run and the previous one, your
 `settings.json` (including a random install ID made on your console, not

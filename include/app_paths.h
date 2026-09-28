@@ -1,7 +1,7 @@
 #pragma once
 
 #define APP_NAME "Kasumi"
-#define APP_BUILD "85"
+#define APP_BUILD "86"
 /* Set by the Makefile from VERSION_MAJOR / MINOR / MICRO / SUFFIX. */
 #ifndef APP_VERSION
 #define APP_VERSION "0.0.0-dev"
@@ -11,7 +11,9 @@
 #define APP_DATA_DIR "sdmc:/3ds/kasumi"
 /* Opt-in diagnostic reports go here (server/report-worker). A URL containing
  * "CHANGE-ME" disables the feature (for forks without a service). */
-#define REPORT_URL "https://kasumi-reports.p0mpurin.workers.dev/report"
+#define REPORT_BASE "https://kasumi-reports.p0mpurin.workers.dev"
+#define REPORT_URL REPORT_BASE "/report"
+#define STATS_URL REPORT_BASE "/stats"
 /* The project was called OpenNOW-3DS before it was renamed to Kasumi. */
 #define APP_LEGACY_DATA_DIR "sdmc:/3ds/opennow-3ds"
 

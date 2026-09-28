@@ -17,6 +17,7 @@
 #include "queue_alert.h"
 #include "regions.h"
 #include "report.h"
+#include "perf_stats.h"
 #include "updater.h"
 #include "play_history.h"
 #include "screenshot.h"
@@ -172,6 +173,7 @@ static void render_wide_video(bool draw_bottom)
             mvd_video_skip_oldest_frame();
             --ready;
             ++skipped;
+            ++g_perf.skipped;
         }
         /* Strict two-vblank cadence: a frame is never shown for only one
          * refresh (that reads as a hitch too); overflow is trimmed above. */
@@ -179,6 +181,7 @@ static void render_wide_video(bool draw_bottom)
             present = true;
         } else if (!ready && since == 2) {
             ++repeated;
+            ++g_perf.repeated;
             if (last_repeat_at && now_ms - last_repeat_at < 20000) reserve = reserve_low + 1;
             last_repeat_at = now_ms;
         }
@@ -208,6 +211,7 @@ static void render_wide_video(bool draw_bottom)
                     mvd_video_skip_ready_frame(best);
                     if (quiet) ++quiet_drops;
                     ++drained;
+                    ++g_perf.drained;
                     drop_wait = 0;
                 }
                 backlog_streak = 0;
@@ -345,6 +349,10 @@ static void refresh_device_status(void)
     const unsigned resent = webrtc_transport_resent_packets(&g_transport);
     g_app.resent_per_second = resent >= last_resent ? resent - last_resent : 0;
     last_resent = resent;
+    if (g_app.view == VIEW_STREAM && g_perf.active)
+        perf_sample(g_transport.rtt_ms, g_app.wifi_bars, g_transport.video_kbps, g_app.fps,
+                    g_app.resent_per_second, mvd_video_frames_lost(), g_transport.keyframe_requests,
+                    audio_output_concealed());
 }
 
 static void keep_selection_visible(void)
@@ -443,6 +451,7 @@ static void close_media(void)
 static void leave_session(void)
 {
     diagnostic_log("APP", "user left the session");
+    g_perf.user_left = true;
     close_media();
     /* If the worker is mid-request, cancel it and stop once it is free. */
     if (net_worker_busy()) {
@@ -575,6 +584,12 @@ static void change_setting(int direction)
         g_app.guide_page = 0;
         return;
     }
+    if (index == SETTING_SHARE_STATS) {
+        screens_setting_change(&g_app, index, direction);
+        if (!g_app.settings.share_stats) remove(REPORT_STATS_PENDING_PATH);
+        diagnostic_log("REPORT", "share stats %s", g_app.settings.share_stats ? "on" : "off");
+        return;
+    }
     if (index == SETTING_SHARE) {
         screens_setting_change(&g_app, index, direction);
         diagnostic_log("REPORT", "share diagnostics %s", g_app.settings.share_reports == SHARE_YES ? "on" : "off");
@@ -678,7 +693,10 @@ static void handle_modal(u32 down, AppAction action)
     g_app.modal = MODAL_NONE;
     if (modal == MODAL_SHARE_ASK) {
         g_app.settings.share_reports = confirm ? SHARE_YES : SHARE_NO;
+        g_app.settings.share_stats = confirm;
+        g_app.settings.share_consent = SHARE_CONSENT_VERSION;
         diagnostic_log("REPORT", "share diagnostics answered %s", confirm ? "yes" : "no");
+        if (!confirm) remove(REPORT_STATS_PENDING_PATH);
         save_settings();
         show_notice(confirm ? "Thank you! Change it anytime in Settings > System"
                             : "Nothing will be sent. Change it anytime in Settings > System");
@@ -1352,6 +1370,7 @@ static void track_session(void)
     static bool was_active;
     if (!gfn_session_active(&g_client)) {
         finish_history();
+        if (g_perf.active) perf_end(g_app.settings.install_id);
         /* A game's own options only last for its session. */
         if (was_active) {
             was_active = false;
@@ -1385,6 +1404,7 @@ static void track_session(void)
             g_app.reconnect_attempt = 1;
             reconnect_at = now;
             show_notice("Welcome back - reconnecting to your rig");
+            ++g_perf.reconnects;
             retry_session();
             return;
         }
@@ -1395,6 +1415,9 @@ static void track_session(void)
         if (!g_app.stream_started_at) {
             g_app.stream_started_at = now;
             diagnostic_log("APP", "stream started freeTierGuess=%d", g_app.free_tier_guess);
+            char region[40];
+            regions_last_used(region, sizeof(region));
+            perf_begin(g_current_game.title, region, stream_profile_weak(), (unsigned)g_app.settings.bitrate_mode);
             play_history_begin(g_current_game.app_id, g_current_game.title);
             g_history_open = true;
         }
@@ -1431,6 +1454,7 @@ static void track_session(void)
     if (session_gone()) {
         diagnostic_log("APP", "session ended on NVIDIA's side (HTTP %d); not reconnecting", g_signal.upgrade_http);
         queue_auto_report("session-ended");
+        perf_note_error("session-ended");
         g_app.reconnect_attempt = 4;
         return;
     }
@@ -1464,6 +1488,7 @@ static void track_session(void)
         if (now - reconnect_at >= 8000) {
             g_app.reconnect_attempt = 4;
             queue_auto_report("reconnect-failed");
+            perf_note_error("reconnect-failed");
         }
         return;
     }
@@ -1473,6 +1498,7 @@ static void track_session(void)
                    g_transport.state == WEBRTC_FAILED ? g_transport.status : g_signal.status,
                    g_app.reconnect_attempt);
     show_notice("Connection lost - reconnecting");
+    ++g_perf.reconnects;
     retry_session();
 }
 
@@ -1718,11 +1744,28 @@ static void auto_report_tick(void)
     }
 }
 
+/* A finished session's summary goes out from the menus when idle. */
+static bool g_stats_inflight;
+
+static void stats_tick(void)
+{
+    static u64 tried_at;
+    if (!g_app.settings.share_stats || !report_available() || g_stats_inflight) return;
+    if ((g_app.view != VIEW_LIBRARY && g_app.view != VIEW_WELCOME) || gfn_session_active(&g_client) ||
+        net_worker_busy() || g_app.modal != MODAL_NONE)
+        return;
+    const u64 now = osGetTime();
+    if (tried_at && now - tried_at < 60000) return;
+    if (!report_stats_pending()) return;
+    tried_at = now;
+    if (submit_job(NET_JOB_SEND_STATS, NULL, NULL, NULL)) g_stats_inflight = true;
+}
+
 /* Asked once per console, when the menus are quiet. */
 static void share_prompt_tick(void)
 {
     static bool asked;
-    if (asked || g_app.settings.share_reports != SHARE_ASK || !report_available()) return;
+    if (asked || g_app.settings.share_consent >= SHARE_CONSENT_VERSION || !report_available()) return;
     if ((g_app.view != VIEW_LIBRARY && g_app.view != VIEW_WELCOME) || g_app.whats_new_open ||
         g_app.guide_page >= 0 || g_app.update_open || g_app.modal != MODAL_NONE || g_app.busy)
         return;
@@ -1753,6 +1796,7 @@ static void finish_jobs(void)
         g_current_game = g_client.resume_game;
         open_modal(MODAL_RESUME, "再開", "RESUME YOUR GAME?", text);
     }
+    if (result.kind == NET_JOB_SEND_STATS) g_stats_inflight = false;
     if (result.kind == NET_JOB_SEND_REPORT && g_auto_inflight) {
         g_auto_inflight = false;
         if (result.ok) {
@@ -1922,7 +1966,11 @@ int main(int argc, char **argv)
             loop_started = loop_now;
             if (g_app.view == VIEW_STREAM) {
                 if (loop_ms > g_loop_max_ms) g_loop_max_ms = loop_ms;
-                if (loop_ms > 25) ++g_loop_slow;
+                if (loop_ms > 25) {
+                    ++g_loop_slow;
+                    ++g_perf.slow_loops;
+                }
+                if (loop_ms > g_perf.loop_max_ms) g_perf.loop_max_ms = loop_ms;
             }
         }
         net_worker_sync(&g_client);
@@ -1951,6 +1999,7 @@ int main(int argc, char **argv)
             auto_update_check();
             share_prompt_tick();
             auto_report_tick();
+            stats_tick();
         }
         if (g_app.whats_new_open && g_app.view != VIEW_STREAM) {
             handle_whats_new(down, repeat, action);
@@ -2029,6 +2078,7 @@ int main(int argc, char **argv)
     }
 
     finish_history();
+    if (g_perf.active) perf_end(g_app.settings.install_id);
     aptUnhook(&g_apt_cookie);
     queue_alert_exit();
     audio_output_close();

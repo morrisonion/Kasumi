@@ -80,6 +80,7 @@ static bool run_job(NetJobKind kind, const char *text, const GfnGame *game)
         return true;
     case NET_JOB_RESUME_CHECK: return gfn_resume_check(&g_work);
     case NET_JOB_SEND_REPORT: return report_send(text);
+    case NET_JOB_SEND_STATS: return report_send_stats();
     case NET_JOB_STOP_SESSION:
         if (gfn_stop_session(&g_work)) return true;
         /* Keep a stuck session visible so the user can try again. */

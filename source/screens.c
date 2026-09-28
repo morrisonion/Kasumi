@@ -205,6 +205,7 @@ static const SettingEntry SETTING_ENTRIES[] = {
     { SETTING_POINTER, NULL, NULL },
     { SETTING_GUIDE, NULL, NULL },
     { SETTING_SHARE, NULL, NULL },
+    { SETTING_SHARE_STATS, NULL, NULL },
     { SETTING_REPORT, NULL, NULL },
     { -1, "更新", "UPDATES" },
     { SETTING_UPDATES, NULL, NULL },
@@ -236,7 +237,8 @@ static const char *const SETTING_LABELS[SETTING_COUNT] = {
     [SETTING_MENU_AUDIO] = "Audio in menus", [SETTING_LID] = "Closing the lid",
     [SETTING_CONNECTION] = "Connection check", [SETTING_GUIDE] = "Getting started",
     [SETTING_NETWORK] = "Connection type", [SETTING_SERVER] = "Server",
-    [SETTING_REPORT] = "Send diagnostic report", [SETTING_SHARE] = "Share diagnostics",
+    [SETTING_REPORT] = "Send diagnostic report", [SETTING_SHARE] = "Share problem reports",
+    [SETTING_SHARE_STATS] = "Share performance stats",
     [SETTING_UPDATES] = "Software update", [SETTING_AUTO_UPDATE] = "Check automatically",
     [SETTING_UPDATE_CHANNEL] = "Update channel",
 };
@@ -251,7 +253,7 @@ static const char *const SETTING_JP[SETTING_COUNT] = {
     [SETTING_MENU_AUDIO] = "メニュー音", [SETTING_LID] = "スリープ",
     [SETTING_CONNECTION] = "接続", [SETTING_GUIDE] = "案内",
     [SETTING_NETWORK] = "回線", [SETTING_SERVER] = "サーバー",
-    [SETTING_REPORT] = "報告", [SETTING_SHARE] = "協力",
+    [SETTING_REPORT] = "報告", [SETTING_SHARE] = "協力", [SETTING_SHARE_STATS] = "統計",
     [SETTING_UPDATES] = "更新", [SETTING_AUTO_UPDATE] = "自動確認",
     [SETTING_UPDATE_CHANNEL] = "チャンネル",
 };
@@ -323,6 +325,7 @@ static unsigned setting_option(const App *app, int setting, unsigned *count)
     case SETTING_LID: *count = LID_MODE_COUNT; return s->lid_mode;
     case SETTING_NETWORK: *count = 2; return s->net_weak ? 1 : 0;
     case SETTING_SHARE: *count = 2; return s->share_reports == SHARE_YES ? 0 : 1;
+    case SETTING_SHARE_STATS: *count = 2; return s->share_stats ? 0 : 1;
     case SETTING_SERVER: *count = 2 + regions_count(); return server_index(s);
     case SETTING_AUTO_UPDATE: *count = 2; return s->auto_update ? 0 : 1;
     case SETTING_UPDATE_CHANNEL: *count = 2; return s->update_beta ? 1 : 0;
@@ -389,6 +392,7 @@ static const char *setting_value(const App *app, int setting)
     case SETTING_GUIDE: return "Open";
     case SETTING_REPORT: return report_available() ? "Send" : "Unavailable";
     case SETTING_SHARE: return s->share_reports == SHARE_YES ? "On" : "Off";
+    case SETTING_SHARE_STATS: return s->share_stats ? "On" : "Off";
     case SETTING_UPDATES: {
         static char text[48];
         const UpdateInfo info = updater_info();
@@ -473,6 +477,10 @@ static const char *setting_description(const App *app, int setting)
         return s->share_reports == SHARE_YES
             ? "When something goes wrong (a crash, freeze or failed stream), Kasumi sends its log to the developer on its own, at most once per run. No login or passwords."
             : "Kasumi never sends anything on its own. Turn on to send the log automatically when something goes wrong, which helps fix bugs faster.";
+    case SETTING_SHARE_STATS:
+        return s->share_stats
+            ? "After each session, Kasumi sends a few numbers: ping, bitrate, smoothness, lost frames, decode time. No log text, no addresses, no account."
+            : "Turn on to send a few anonymous numbers (ping, smoothness, lost frames) after each session. It shows what to improve for real players.";
     case SETTING_REPORT:
         return "Having a problem? Send this run's and the last run's log to Kasumi's developer and get a code to share. Only when you choose; nothing is sent otherwise.";
     case SETTING_UPDATES:
@@ -523,6 +531,7 @@ void screens_setting_change(App *app, int setting, int direction)
     case SETTING_LID: s->lid_mode = (s->lid_mode + LID_MODE_COUNT + step) % LID_MODE_COUNT; break;
     case SETTING_NETWORK: s->net_weak = !s->net_weak; break;
     case SETTING_SHARE: s->share_reports = s->share_reports == SHARE_YES ? SHARE_NO : SHARE_YES; break;
+    case SETTING_SHARE_STATS: s->share_stats = !s->share_stats; break;
     case SETTING_SERVER: {
         const unsigned count = 2 + regions_count();
         set_server_index(s, (server_index(s) + (step < 0 ? count - 1 : 1)) % count);
@@ -1034,11 +1043,11 @@ static void draw_share_ask_top(float p)
     ui_text(200, 55, 18, UI_ACCENT, UI_ALIGN_CENTER, "協");
     draw_title(200, 92, "協力のお願い", "HELP IMPROVE KASUMI?");
     ui_text_wrap(200, 118, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, 300, 2, 14,
-                 "When something goes wrong, Kasumi can send its log to the developer on its own.");
+                 "Share diagnostics with the developer to find bugs and make streaming smoother.");
     static const char *const points[3] = {
-        "Only after a crash, freeze or failed stream",
-        "Never your login · IP addresses shortened",
-        "Kept 30 days · change it in Settings > System",
+        "Problem reports: the log, after a crash or failed stream",
+        "Performance stats: ping and smoothness after each session",
+        "Never your login · change it in Settings > System",
     };
     for (int i = 0; i < 3; ++i) {
         const float y = 150 + i * 15.0f;

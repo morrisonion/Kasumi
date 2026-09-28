@@ -41,5 +41,10 @@ void mvd_video_zoom_position(unsigned *x, unsigned *y);
 void mvd_video_close(void);
 bool mvd_video_active(void);
 unsigned mvd_video_decoded_frames(void);
+/* Frames lost upstream (each held the picture until a keyframe), ever. */
+unsigned mvd_video_frames_lost(void);
+/* Decode time totals since start (microseconds); `reset_max` restarts the
+ * running maximum. For the session performance summary. */
+void mvd_video_decode_totals(unsigned long long *sum_us, unsigned *count, unsigned *max_us, bool reset_max);
 unsigned mvd_video_errors(void);
 const char *mvd_video_status(void);

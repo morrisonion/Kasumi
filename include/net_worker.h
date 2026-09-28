@@ -29,7 +29,9 @@ typedef enum {
     NET_JOB_UPDATE_INSTALL,
     NET_JOB_RESUME_CHECK,
     /* Opt-in diagnostic report (report.h). */
-    NET_JOB_SEND_REPORT
+    NET_JOB_SEND_REPORT,
+    /* Anonymous session performance summary (perf_stats.h). */
+    NET_JOB_SEND_STATS
 } NetJobKind;
 
 typedef struct {

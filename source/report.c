@@ -27,7 +27,35 @@ static char g_error[96];
 const char *report_code(void) { return g_code; }
 const char *report_error(void) { return g_error; }
 
-bool report_available(void) { return strstr(REPORT_URL, "CHANGE-ME") == NULL; }
+static char *read_file(const char *path, size_t cap, size_t *length);
+
+bool report_available(void) { return strstr(REPORT_BASE, "CHANGE-ME") == NULL; }
+
+bool report_stats_pending(void)
+{
+    struct stat st;
+    return stat(REPORT_STATS_PENDING_PATH, &st) == 0 && st.st_size > 0;
+}
+
+bool report_send_stats(void)
+{
+    size_t length = 0;
+    char *summary = read_file(REPORT_STATS_PENDING_PATH, 4096, &length);
+    if (!summary) return false;
+    static const char *const headers[] = { "Content-Type: application/json" };
+    HttpResponse response;
+    http_next_request(15, NULL, NULL);
+    const bool sent = http_request("POST", STATS_URL, "Kasumi-3DS", headers, 1, summary, 4096, &response);
+    const long status = response.status;
+    http_response_free(&response);
+    free(summary);
+    /* Delivered, or refused as malformed: done. Anything else (no
+     * connection, rate limit, a service without /stats yet) keeps it for a
+     * later try; a newer session's summary replaces it anyway. */
+    if (sent && (status == 200 || status == 400 || status == 413)) remove(REPORT_STATS_PENDING_PATH);
+    diagnostic_log("REPORT", "session summary sent=%d http=%ld", sent, sent ? status : 0);
+    return sent && status == 200;
+}
 
 /* The whole file, or its last `cap` bytes. NULL if missing. */
 static char *read_file(const char *path, size_t cap, size_t *length)

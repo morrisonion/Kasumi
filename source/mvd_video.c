@@ -32,6 +32,8 @@ static unsigned g_status_ok, g_status_paramset, g_status_ready, g_status_incompl
 static u64 g_perf_process_sum, g_perf_render_sum, g_perf_copy_sum;
 static u64 g_perf_process_max, g_perf_render_max, g_perf_copy_max;
 static unsigned g_perf_samples;
+static u64 g_decode_total_us;
+static unsigned g_decode_total_count, g_decode_max_us, g_frames_lost;
 static char g_status[128] = "MVD idle";
 /* Wide mode: the top screen shows 800 columns. MVD scales the 960x540
  * source gently to 800x480 inside a 1024x512 buffer (the GPU texture size,
@@ -80,6 +82,10 @@ static void decoder_main(void *arg);
 
 static void record_performance(u64 process_ticks, u64 render_ticks, u64 copy_ticks)
 {
+    const unsigned process_us = (unsigned)(process_ticks / (SYSCLOCK_ARM11 / 1000000u));
+    g_decode_total_us += process_us;
+    ++g_decode_total_count;
+    if (process_us > g_decode_max_us) g_decode_max_us = process_us;
     g_perf_process_sum += process_ticks;
     g_perf_render_sum += render_ticks;
     g_perf_copy_sum += copy_ticks;
@@ -491,7 +497,10 @@ void mvd_video_skip_ready_frame(unsigned index)
 
 void mvd_video_resync(void)
 {
-    if (!g_await_idr) diagnostic_log("MVD", "frame lost upstream; holding picture until IDR");
+    if (!g_await_idr) {
+        diagnostic_log("MVD", "frame lost upstream; holding picture until IDR");
+        ++g_frames_lost;
+    }
     g_await_idr = true;
 }
 
@@ -848,5 +857,14 @@ void mvd_video_close(void)
 
 bool mvd_video_active(void) { return g_active; }
 unsigned mvd_video_decoded_frames(void) { return g_frames; }
+unsigned mvd_video_frames_lost(void) { return g_frames_lost; }
+
+void mvd_video_decode_totals(unsigned long long *sum_us, unsigned *count, unsigned *max_us, bool reset_max)
+{
+    *sum_us = g_decode_total_us;
+    *count = g_decode_total_count;
+    *max_us = g_decode_max_us;
+    if (reset_max) g_decode_max_us = 0;
+}
 unsigned mvd_video_errors(void) { return g_errors; }
 const char *mvd_video_status(void) { return g_status; }

@@ -29,6 +29,21 @@ static int64_t g_measured_at;
 static char g_choice[40];
 /* NVIDIA's guess of the region for this internet address ("local-region"). */
 static char g_local[40];
+static char g_last_used[40];
+
+void regions_last_used(char *name, size_t size)
+{
+    LightLock_Lock(&g_lock);
+    snprintf(name, size, "%s", g_last_used);
+    LightLock_Unlock(&g_lock);
+}
+
+static void set_last_used(const char *name)
+{
+    LightLock_Lock(&g_lock);
+    snprintf(g_last_used, sizeof(g_last_used), "%s", name);
+    LightLock_Unlock(&g_lock);
+}
 
 static void current_ssid(char *out, size_t size)
 {
@@ -284,6 +299,7 @@ void regions_resolve(char *url, size_t size)
     snprintf(url, size, "%s", REGION_NVIDIA_URL);
     if (!strcmp(choice, REGION_CHOICE_NVIDIA)) {
         diagnostic_log("REGION", "server=NVIDIA default");
+        set_last_used("NVIDIA default");
         return;
     }
     if (choice[0]) {
@@ -296,6 +312,7 @@ void regions_resolve(char *url, size_t size)
         }
         LightLock_Unlock(&g_lock);
         diagnostic_log("REGION", "server=%s%s", choice, found ? "" : " (not listed; NVIDIA default)");
+        set_last_used(found ? choice : "NVIDIA default");
         return;
     }
     /* Auto: the region with the lowest ping from this network. Measuring
@@ -308,7 +325,9 @@ void regions_resolve(char *url, size_t size)
     if (best >= 0 && regions_get((unsigned)best, &region)) {
         snprintf(url, size, "%s", region.url);
         diagnostic_log("REGION", "server=auto %s %d ms", region.name, region.ms);
+        set_last_used(region.name);
     } else {
         diagnostic_log("REGION", "server=auto: no measurement; NVIDIA default");
+        set_last_used("NVIDIA default");
     }
 }

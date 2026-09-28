@@ -18,6 +18,9 @@ typedef enum {
 enum { LID_PAUSE, LID_SLEEP, LID_KEEP_PLAYING, LID_MODE_COUNT };
 /* Automatic diagnostic reports: not asked yet, yes, or no. */
 enum { SHARE_ASK, SHARE_YES, SHARE_NO };
+/* Bumped when what is shared changes, so everyone is asked again:
+ * 2 = problem reports + session performance stats (beta.16). */
+#define SHARE_CONSENT_VERSION 2
 
 typedef struct {
     GfnButtonLayout button_layout;
@@ -51,6 +54,10 @@ typedef struct {
     char server[40];
     /* Send a report automatically when something goes wrong (SHARE_*). */
     unsigned share_reports;
+    /* Anonymous performance summary after each session. */
+    bool share_stats;
+    /* The SHARE_CONSENT_VERSION last answered (0 = never asked). */
+    unsigned share_consent;
     /* Random, made on this console: tells reports from one console apart.
      * Not linked to the NVIDIA account. */
     char install_id[20];

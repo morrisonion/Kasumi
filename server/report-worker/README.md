@@ -28,6 +28,8 @@ crash dump from the last 3 days, if there is one.
 
 ## Reading reports
 
+- Performance page (averages by version, connection type, bitrate and server,
+  plus recent sessions): `.../stats?key=ADMIN_KEY` (add `&days=7` or `&days=90`)
 - All reports: `https://kasumi-reports.<your-name>.workers.dev/reports?key=ADMIN_KEY`
 - One report: `.../report/K7F2QX?key=ADMIN_KEY` (dash optional)
 - Its crash dump: `.../report/K7F2QX/dump?key=ADMIN_KEY`

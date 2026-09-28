@@ -2,6 +2,8 @@
 
 #include <stdbool.h>
 
+#include "app_paths.h"
+
 /* Opt-in diagnostic reports: sent only when the player chooses Settings >
  * System > Send diagnostic report and confirms. The report holds the
  * diagnostic log of this run and the previous one (IP addresses shortened),
@@ -20,6 +22,13 @@ bool report_send(const char *trigger);
  * version) means that run crashed, froze or lost power. */
 #define REPORT_CLEAN_EXIT "exit clean"
 bool report_previous_run_unclean(void);
+
+/* The newest finished session's performance summary, waiting to be sent
+ * (written by perf_stats; survives an exit). */
+#define REPORT_STATS_PENDING_PATH APP_DATA_DIR "/stats-pending.json"
+bool report_stats_pending(void);
+/* Worker thread only: send and delete the pending summary. */
+bool report_send_stats(void);
 
 /* "K7F-2QX" after a successful send. */
 const char *report_code(void);

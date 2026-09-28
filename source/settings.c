@@ -33,6 +33,8 @@ void settings_defaults(AppSettings *settings)
     settings->update_beta = true;
     settings->net_weak = false;
     settings->share_reports = SHARE_ASK;
+    settings->share_stats = false;
+    settings->share_consent = 0;
     settings->install_id[0] = '\0';
     settings->server[0] = '\0';
 }
@@ -94,6 +96,8 @@ bool settings_load(AppSettings *settings)
     settings->update_beta = read_bool(root, "update_beta", settings->update_beta);
     settings->net_weak = read_bool(root, "net_weak", settings->net_weak);
     settings->share_reports = (unsigned)read_int(root, "share_reports", (int)settings->share_reports, 3);
+    settings->share_stats = read_bool(root, "share_stats", settings->share_stats);
+    settings->share_consent = (unsigned)read_int(root, "share_consent", 0, 1000);
     json_t *install = json_object_get(root, "install_id");
     if (json_is_string(install)) snprintf(settings->install_id, sizeof(settings->install_id), "%s", json_string_value(install));
     json_t *server = json_object_get(root, "server");
@@ -106,7 +110,7 @@ bool settings_save(const AppSettings *settings)
 {
     mkdir("sdmc:/3ds", 0777);
     mkdir(APP_DATA_DIR, 0777);
-    json_t *root = json_pack("{s:i,s:i,s:b,s:b,s:b,s:b,s:b,s:i,s:b,s:i,s:i,s:i,s:i,s:b,s:i,s:b,s:b,s:b,s:b,s:s,s:i,s:s}",
+    json_t *root = json_pack("{s:i,s:i,s:b,s:b,s:b,s:b,s:b,s:i,s:b,s:i,s:i,s:i,s:i,s:b,s:i,s:b,s:b,s:b,s:b,s:s,s:i,s:s,s:b,s:i}",
                              "button_layout", (int)settings->button_layout,
                              "deadzone", (int)settings->deadzone,
                              "swap_shoulders", settings->swap_shoulders,
@@ -128,7 +132,9 @@ bool settings_save(const AppSettings *settings)
                              "net_weak", settings->net_weak,
                              "server", settings->server,
                              "share_reports", (int)settings->share_reports,
-                             "install_id", settings->install_id);
+                             "install_id", settings->install_id,
+                             "share_stats", settings->share_stats,
+                             "share_consent", (int)settings->share_consent);
     if (!root) return false;
     const bool ok = json_dump_file(root, SETTINGS_PATH, JSON_INDENT(2)) == 0;
     json_decref(root);

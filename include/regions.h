@@ -41,3 +41,5 @@ void regions_set_choice(const char *choice);
 /* Worker thread only: the CloudMatch base URL for a new session. Auto pings
  * the regions first if they were not measured on this network. */
 void regions_resolve(char *url, size_t size);
+/* The server the last session went to ("Germany", "NVIDIA default"). */
+void regions_last_used(char *name, size_t size);
