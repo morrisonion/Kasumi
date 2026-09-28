@@ -1220,6 +1220,8 @@ bool gfn_start_session(GfnClient *client, const GfnGame *game)
     memset(client->session_id, 0, sizeof(client->session_id));
     client->queue_best = 0;
     client->queue_step = client->seat_setup_step = -1;
+    client->poll_fail_since = 0;
+    client->poll_failures = 0;
     memset(client->signaling_url, 0, sizeof(client->signaling_url));
     memset(client->session_token, 0, sizeof(client->session_token));
     memset(client->server_ip, 0, sizeof(client->server_ip));
@@ -1292,15 +1294,48 @@ void gfn_session_tick(GfnClient *client)
         diagnostic_log("CLOUDMATCH", "poll transport failure; session retained");
         return;
     }
-    diagnostic_log("CLOUDMATCH", "poll http=%ld bytes=%lu",
-                   response.status, (unsigned long)response.size);
-    if (cloudmatch_status_is_transient(response.status)) {
-        snprintf(client->status, sizeof(client->status),
-                 "CloudMatch poll HTTP %ld; retrying", response.status);
+    const bool transient = cloudmatch_status_is_transient(response.status);
+    /* One line per failure streak (beta.16 logged the same 503 102 times,
+     * without NVIDIA's reason). */
+    if (!transient || !client->poll_failures)
+        diagnostic_log("CLOUDMATCH", "poll http=%ld bytes=%lu",
+                       response.status, (unsigned long)response.size);
+    if (transient) {
+        if (!client->poll_failures++) {
+            client->poll_fail_since = now;
+            cloudmatch_log_response("poll-error", &response);
+        }
+        /* Half a minute of nothing but errors: the session is gone or the
+         * server is overloaded. Say so, so the player can retry. */
+        if (now - client->poll_fail_since >= 30) {
+            char reason[64] = "";
+            json_error_t error;
+            json_t *root = json_loadb(response.body ? response.body : "", response.size, 0, &error);
+            json_t *request_status = json_is_object(root) ? json_object_get(root, "requestStatus") : NULL;
+            json_t *description = json_is_object(request_status) ? json_object_get(request_status, "statusDescription") : NULL;
+            if (json_is_string(description)) snprintf(reason, sizeof(reason), ", %s", json_string_value(description));
+            json_decref(root);
+            snprintf(client->status, sizeof(client->status),
+                     "NVIDIA's servers stopped answering for this session (HTTP %ld%.60s). Press A to try again.",
+                     response.status, reason);
+            diagnostic_log("CLOUDMATCH", "poll gave up after %u errors in %llds", client->poll_failures,
+                           (long long)(now - client->poll_fail_since));
+            client->session_state = GFN_SESSION_ERROR;
+            /* An automatically chosen region may be the problem: the retry
+             * goes through NVIDIA's own pick. */
+            if (strcmp(client->session_base_url, REGION_NVIDIA_URL)) regions_avoid_once();
+        } else {
+            snprintf(client->status, sizeof(client->status),
+                     "NVIDIA's server is busy (HTTP %ld); still trying...", response.status);
+        }
         client->next_session_poll_at = now + 2;
         http_response_free(&response);
         return;
     }
+    if (client->poll_failures)
+        diagnostic_log("CLOUDMATCH", "poll recovered after %u errors", client->poll_failures);
+    client->poll_failures = 0;
+    client->poll_fail_since = 0;
     apply_session_response(client, &response, "Poll");
     http_response_free(&response);
 }

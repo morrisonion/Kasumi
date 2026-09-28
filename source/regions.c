@@ -30,6 +30,14 @@ static char g_choice[40];
 /* NVIDIA's guess of the region for this internet address ("local-region"). */
 static char g_local[40];
 static char g_last_used[40];
+static bool g_avoid_once;
+
+void regions_avoid_once(void)
+{
+    LightLock_Lock(&g_lock);
+    g_avoid_once = true;
+    LightLock_Unlock(&g_lock);
+}
 
 void regions_last_used(char *name, size_t size)
 {
@@ -313,6 +321,15 @@ void regions_resolve(char *url, size_t size)
         LightLock_Unlock(&g_lock);
         diagnostic_log("REGION", "server=%s%s", choice, found ? "" : " (not listed; NVIDIA default)");
         set_last_used(found ? choice : "NVIDIA default");
+        return;
+    }
+    LightLock_Lock(&g_lock);
+    const bool avoid = g_avoid_once;
+    g_avoid_once = false;
+    LightLock_Unlock(&g_lock);
+    if (avoid) {
+        diagnostic_log("REGION", "server=auto: last session there failed; NVIDIA default this time");
+        set_last_used("NVIDIA default");
         return;
     }
     /* Auto: the region with the lowest ping from this network. Measuring

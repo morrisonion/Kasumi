@@ -94,6 +94,10 @@ typedef struct {
     int queue_step;
     int queue_best;
     int64_t next_session_poll_at;
+    /* Since when session polls have only got 502/503/504/429, and how many:
+     * after a while the session counts as failed instead of retrying on. */
+    int64_t poll_fail_since;
+    unsigned poll_failures;
 } GfnClient;
 
 void gfn_client_init(GfnClient *client);

@@ -1761,6 +1761,21 @@ static void stats_tick(void)
     if (submit_job(NET_JOB_SEND_STATS, NULL, NULL, NULL)) g_stats_inflight = true;
 }
 
+/* A session that fails at any stage (queue, rig setup, stream). */
+static void watch_session_errors(void)
+{
+    static bool was_error;
+    const bool error = gfn_session_active(&g_client) &&
+                       (g_client.session_state == GFN_SESSION_ERROR ||
+                        (g_signal.state == NVST_SIGNAL_ERROR && !g_app.stream_started_at));
+    if (error && !was_error) {
+        diagnostic_log("APP", "session failed: %.120s", g_client.session_state == GFN_SESSION_ERROR ? g_client.status : g_signal.status);
+        queue_auto_report(g_app.stream_started_at ? "session-error" : "queue-or-setup-failed");
+        perf_note_error("session-error");
+    }
+    was_error = error;
+}
+
 /* Asked once per console, when the menus are quiet. */
 static void share_prompt_tick(void)
 {
@@ -2054,6 +2069,7 @@ int main(int argc, char **argv)
         g_app.status = current_status();
         g_app.toast = g_notice[0] && osGetTime() < g_notice_until ? g_notice : NULL;
         track_session();
+        watch_session_errors();
         g_app.video_stalled = g_app.view == VIEW_STREAM && g_transport.last_decoded_frame_at &&
                               osGetTime() - g_transport.last_decoded_frame_at > 1500;
         /* While video owns the top screen, redraw the lower screen only when

@@ -41,5 +41,9 @@ void regions_set_choice(const char *choice);
 /* Worker thread only: the CloudMatch base URL for a new session. Auto pings
  * the regions first if they were not measured on this network. */
 void regions_resolve(char *url, size_t size);
+/* The next Auto session goes through NVIDIA's own pick once (a session on
+ * the measured region just failed). */
+void regions_avoid_once(void);
+
 /* The server the last session went to ("Germany", "NVIDIA default"). */
 void regions_last_used(char *name, size_t size);
