@@ -16,6 +16,10 @@
 //   GET  /reports?key=ADMIN_KEY        list recent reports
 //   POST /stats                        anonymous session performance summary
 //   GET  /stats?key=ADMIN_KEY          performance page (averages + recent)
+//   GET  /api/stats?days=90            raw summaries as JSON (for dashboard.html)
+//   GET  /api/reports                  report list as JSON
+// Read routes take the key as ?key= or an "X-Admin-Key" header, and allow
+// cross-origin reads so the local dashboard.html can use them.
 
 const KEEP_SECONDS = 30 * 24 * 3600;
 const MAX_UPLOAD_BYTES = 1536 * 1024;
@@ -28,7 +32,14 @@ const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // no 0/O, 1/I/L
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+    // A key sent as a header (the dashboard) counts like ?key=. This URL
+    // object belongs to this request only.
+    const headerKey = request.headers.get("x-admin-key");
+    if (headerKey) url.searchParams.set("key", headerKey);
     try {
+      if (request.method === "GET" && url.pathname === "/api/stats") return await apiStats(url, env);
+      if (request.method === "GET" && url.pathname === "/api/reports") return await apiReports(url, env);
       if (request.method === "POST" && url.pathname === "/report") return await submit(request, env);
       if (request.method === "GET" && url.pathname === "/reports") return await list(url, env);
       if (request.method === "POST" && url.pathname === "/stats") return await submitStats(request, env);
@@ -47,12 +58,20 @@ function esc(value) {
   return String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
+// Everything readable needs the admin key anyway, so any origin may ask.
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-allow-headers": "content-type, x-admin-key",
+  "access-control-max-age": "86400",
+};
+
 function text(body, status = 200, type = "text/plain; charset=utf-8") {
-  return new Response(body, { status, headers: { "content-type": type } });
+  return new Response(body, { status, headers: { "content-type": type, ...CORS } });
 }
 
 function json(body, status = 200) {
-  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...CORS } });
 }
 
 function authorised(url, env) {
@@ -156,6 +175,7 @@ async function view(url, env, code, wantDump) {
       headers: {
         "content-type": "application/octet-stream",
         "content-disposition": `attachment; filename="${code}-${report.dump.name || "crash_dump.dmp"}"`,
+        ...CORS,
       },
     });
   }
@@ -349,4 +369,23 @@ async function statsPage(url, env) {
       recent + "</table>",
   ];
   return text(html.join(""), 200, "text/html; charset=utf-8");
+}
+
+// ---- JSON for dashboard.html ------------------------------------------------
+
+async function apiStats(url, env) {
+  if (!authorised(url, env)) return json({ error: "not authorised" }, 401);
+  const days = Math.min(90, Math.max(1, Number(url.searchParams.get("days")) || 90));
+  const since = Date.now() - days * 86400000;
+  const rows = (await loadStats(env)).filter((r) => r.t >= since);
+  return json({ days, rows });
+}
+
+async function apiReports(url, env) {
+  if (!authorised(url, env)) return json({ error: "not authorised" }, 401);
+  const result = await env.REPORTS.list({ prefix: "r:", limit: 1000 });
+  const rows = result.keys
+    .map((k) => ({ code: k.name.slice(2), ...(k.metadata || {}) }))
+    .sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  return json({ rows });
 }

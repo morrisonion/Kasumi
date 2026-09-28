@@ -26,6 +26,15 @@ crash dump from the last 3 days, if there is one.
    `https://kasumi-reports.<your-name>.workers.dev`. Kasumi's
    `REPORT_URL` (in `include/app_paths.h`) points there.
 
+## Dashboard
+
+Open `dashboard.html` from this folder in a browser (double-click it), paste
+`ADMIN_KEY`, and press **Load**: headline numbers, charts, a breakdown by
+version / connection / server / bitrate / game, recent sessions, and the
+reports with their logs and crash dumps. The key is sent only to the report
+service (as a header, not in the address), and is remembered on that PC only
+if you tick the box.
+
 ## Reading reports
 
 - Performance page (averages by version, connection type, bitrate and server,

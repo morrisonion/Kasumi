@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kasumi Dashboard</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0e0e0f;
+    --surface-1: #161618;
+    --surface-2: #1d1d20;
+    --line: #2a2a2e;
+    --grid: #232327;
+    --text-primary: #f2f0ea;
+    --text-secondary: #b9b6ad;
+    --text-muted: #85827b;
+    --accent: #7ebea5;          /* Kasumi celadon */
+    --accent-ink: #0e1a15;
+    --series-1: #7ebea5;        /* single-series marks */
+    --critical: #d03b3b;
+    --warning: #fab219;
+    --good: #0ca30c;
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:where(:not([data-theme="dark"])) {
+      color-scheme: light;
+      --bg: #f4f3ef;
+      --surface-1: #fcfcfb;
+      --surface-2: #f0efeb;
+      --line: #dddbd4;
+      --grid: #ebe9e3;
+      --text-primary: #0b0b0b;
+      --text-secondary: #52514e;
+      --text-muted: #77756f;
+      --accent: #2f7a5f;
+      --accent-ink: #ffffff;
+      --series-1: #3a8a6c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text-primary);
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 24px 20px 64px; }
+  header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 22px; }
+  .brand { display: flex; align-items: center; gap: 12px; margin-right: auto; }
+  .seal {
+    width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center;
+    background: var(--accent); color: var(--accent-ink); font-size: 22px; font-weight: 700;
+  }
+  .brand h1 { font-size: 18px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  .brand p { margin: 0; color: var(--text-muted); font-size: 12px; }
+  .keybox { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input[type=password], input[type=text] {
+    background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--line);
+    border-radius: 8px; padding: 9px 12px; font: inherit; min-width: 260px;
+  }
+  input:focus-visible, button:focus-visible, select:focus-visible, .row:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+  label.check { color: var(--text-secondary); font-size: 12px; display: flex; gap: 6px; align-items: center; }
+  button {
+    font: inherit; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-1);
+    color: var(--text-primary); padding: 8px 14px; cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
+  button:hover { filter: brightness(1.08); }
+  .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 18px; }
+  .seg { display: inline-flex; background: var(--surface-1); border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
+  .seg button { border: 0; background: transparent; padding: 6px 12px; border-radius: 7px; color: var(--text-secondary); }
+  .seg button[aria-pressed=true] { background: var(--surface-2); color: var(--text-primary); box-shadow: inset 0 0 0 1px var(--line); }
+  .status { color: var(--text-muted); font-size: 12px; margin-left: auto; }
+  .status.err { color: var(--critical); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .tile { background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
+  .tile .label { color: var(--text-muted); font-size: 12px; }
+  .tile .value { font-size: 26px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .tile .unit { font-size: 13px; color: var(--text-secondary); font-weight: 500; margin-left: 2px; }
+  .tile .sub { color: var(--text-muted); font-size: 11px; margin-top: 2px; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .card { background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 16px 10px; min-width: 0; }
+  .card h2 { font-size: 13px; font-weight: 600; margin: 0 0 2px; }
+  .card .hint { color: var(--text-muted); font-size: 12px; margin: 0 0 10px; }
+  .chart { position: relative; }
+  .chart svg { display: block; width: 100%; height: 220px; overflow: visible; }
+  .chart .axis text { fill: var(--text-muted); font-size: 11px; }
+  .chart .gridline { stroke: var(--grid); stroke-width: 1; }
+  .chart .baseline { stroke: var(--line); stroke-width: 1; }
+  .chart .empty { fill: var(--text-muted); font-size: 12px; }
+  .tip {
+    position: absolute; pointer-events: none; background: var(--surface-2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 10px; font-size: 12px; white-space: nowrap; opacity: 0; transform: translate(-50%, -100%);
+    transition: opacity .08s; box-shadow: 0 6px 20px rgba(0,0,0,.25);
+  }
+  .tip b { font-variant-numeric: tabular-nums; }
+  .tip .k { color: var(--text-muted); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { padding: 7px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--grid); }
+  th { color: var(--text-muted); font-weight: 500; font-size: 12px; position: sticky; top: 0; background: var(--surface-1); }
+  td:first-child, th:first-child { text-align: left; }
+  .scroll { overflow: auto; max-height: 520px; }
+  .row { cursor: pointer; }
+  .row:hover td { background: var(--surface-2); }
+  .pill { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--text-secondary); }
+  .pill.bad::before { content: "● "; color: var(--critical); }
+  .pill.dump::before { content: "◆ "; color: var(--warning); }
+  .muted { color: var(--text-muted); }
+  .hidden { display: none !important; }
+  .split { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 12px; }
+  @media (max-width: 1100px) { .split { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  pre.log {
+    margin: 0; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+    font: 11.5px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; color: var(--text-secondary);
+    white-space: pre-wrap; word-break: break-word; max-height: 640px; overflow: auto;
+  }
+  .empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
+  .empty-state .seal { margin: 0 auto 14px; width: 56px; height: 56px; font-size: 30px; border-radius: 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div class="seal" aria-hidden="true">霞</div>
+      <div><h1>Kasumi Dashboard</h1><p>Reports and performance from players who chose to share</p></div>
+    </div>
+    <form class="keybox" id="keyform">
+      <input type="password" id="key" placeholder="Admin key" autocomplete="off" aria-label="Admin key">
+      <label class="check"><input type="checkbox" id="remember"> Remember on this PC</label>
+      <button class="primary" type="submit">Load</button>
+    </form>
+  </header>
+
+  <div class="bar">
+    <div class="seg" role="group" aria-label="View">
+      <button type="button" data-tab="perf" aria-pressed="true">Performance</button>
+      <button type="button" data-tab="reports" aria-pressed="false">Reports</button>
+    </div>
+    <div class="seg" role="group" aria-label="Time range" id="range">
+      <button type="button" data-days="7" aria-pressed="false">7 days</button>
+      <button type="button" data-days="30" aria-pressed="true">30 days</button>
+      <button type="button" data-days="90" aria-pressed="false">90 days</button>
+    </div>
+    <button type="button" id="refresh" title="Reload data">↻ Refresh</button>
+    <span class="status" id="status">Enter your admin key to load data.</span>
+  </div>
+
+  <div id="welcome" class="empty-state">
+    <div class="seal" aria-hidden="true">霞</div>
+    <div>Paste the <b>ADMIN_KEY</b> you set in Cloudflare and press <b>Load</b>.</div>
+    <div class="muted" style="margin-top:6px;font-size:12px">It is only sent to your report service, never anywhere else.</div>
+  </div>
+
+  <section id="perf" class="hidden">
+    <div class="tiles" id="tiles"></div>
+    <div class="grid2">
+      <div class="card"><h2>Sessions per day</h2><p class="hint">Game sessions of 30 seconds or more</p><div class="chart" id="c-sessions"></div></div>
+      <div class="card"><h2>Average ping per day</h2><p class="hint">Round trip to NVIDIA, milliseconds</p><div class="chart" id="c-ping"></div></div>
+      <div class="card"><h2>Lost frames per minute, by version</h2><p class="hint">Frames that froze the picture until a keyframe. Lower is better</p><div class="chart" id="c-lost"></div></div>
+      <div class="card"><h2>Hitches per minute, by version</h2><p class="hint">Repeated frames from the pacer. Lower is better</p><div class="chart" id="c-hitch"></div></div>
+    </div>
+    <div class="card" style="margin-bottom:18px">
+      <div class="bar" style="margin-bottom:8px">
+        <h2 style="margin:0">Breakdown</h2>
+        <div class="seg" role="group" aria-label="Group by" id="groupby" style="margin-left:auto">
+          <button type="button" data-g="v" aria-pressed="true">Version</button>
+          <button type="button" data-g="m" aria-pressed="false">Connection</button>
+          <button type="button" data-g="r" aria-pressed="false">Server</button>
+          <button type="button" data-g="br" aria-pressed="false">Bitrate</button>
+          <button type="button" data-g="g" aria-pressed="false">Game</button>
+        </div>
+      </div>
+      <div class="scroll"><table id="t-break"></table></div>
+    </div>
+    <div class="card">
+      <h2>Recent sessions</h2><p class="hint">Newest first</p>
+      <div class="scroll"><table id="t-recent"></table></div>
+    </div>
+  </section>
+
+  <section id="reports" class="hidden">
+    <div class="split">
+      <div class="card"><h2>Reports</h2><p class="hint">Click one to read it. Kept 30 days</p><div class="scroll"><table id="t-reports"></table></div></div>
+      <div class="card" id="viewer">
+        <div class="bar" style="margin-bottom:8px">
+          <h2 id="v-title" style="margin:0">No report selected</h2>
+          <button type="button" id="v-dump" class="hidden" style="margin-left:auto">Download crash dump</button>
+        </div>
+        <pre class="log" id="v-body">Pick a report on the left.</pre>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+"use strict";
+const SERVICE = "https://kasumi-reports.p0mpurin.workers.dev";
+const BITRATES = ["Adaptive", "Steady 1 Mbps", "Steady 1.2 Mbps", "Steady 1.5 Mbps"];
+const state = { key: "", days: 30, tab: "perf", group: "v", stats: [], reports: [], report: null };
+
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const fmt = (v, d = 1) => (Number.isFinite(v) ? v.toFixed(d) : "–");
+
+function store(name, value) { try { value == null ? localStorage.removeItem(name) : localStorage.setItem(name, value); } catch {} }
+function recall(name) { try { return localStorage.getItem(name); } catch { return null; } }
+
+function setStatus(text, error = false) {
+  $("status").textContent = text;
+  $("status").classList.toggle("err", error);
+}
+
+async function api(path, as = "json") {
+  const response = await fetch(SERVICE + path, { headers: { "x-admin-key": state.key } });
+  if (response.status === 401) throw new Error("Wrong key: the service said not authorised.");
+  if (!response.ok) throw new Error("The service answered HTTP " + response.status);
+  return as === "json" ? response.json() : as === "blob" ? response.blob() : response.text();
+}
+
+async function load() {
+  if (!state.key) { setStatus("Enter your admin key first.", true); return; }
+  setStatus("Loading…");
+  try {
+    const [stats, reports] = await Promise.all([api("/api/stats?days=90"), api("/api/reports")]);
+    state.stats = stats.rows || [];
+    state.reports = reports.rows || [];
+    $("welcome").classList.add("hidden");
+    render();
+    setStatus(`Updated ${new Date().toLocaleTimeString()} · ${state.stats.length} sessions, ${state.reports.length} reports in 90 days`);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+// ---- Aggregation --------------------------------------------------------
+
+function inRange(rows) {
+  const since = Date.now() - state.days * 86400000;
+  return rows.filter((r) => r.t >= since);
+}
+
+function summarise(rows) {
+  const n = rows.length;
+  if (!n) return null;
+  const minutes = rows.reduce((a, r) => a + (r.d || 0), 0) / 60;
+  const avg = (k, scale = 1) => {
+    const v = rows.filter((r) => Number.isFinite(r[k]) && r[k] >= 0).map((r) => r[k] / scale);
+    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : NaN;
+  };
+  const perMin = (k) => (minutes ? rows.reduce((a, r) => a + (r[k] || 0), 0) / minutes : NaN);
+  return {
+    sessions: n,
+    consoles: new Set(rows.map((r) => r.i).filter(Boolean)).size,
+    hours: minutes / 60,
+    ping: avg("p"), pingMax: avg("pm"), kbps: avg("k"), fps: avg("f", 10), wifi: avg("w", 10),
+    lost: perMin("lo"), hitches: perMin("rp"), keyframes: perMin("kf"),
+    reconnects: perMin("rc") * 60, decode: avg("da") / 1000,
+    errors: rows.filter((r) => r.e && r.e !== "user" && r.e !== "ended").length / n,
+  };
+}
+
+function groupLabel(key, value) {
+  if (key === "m") return value ? "Weak / hotspot" : "Standard";
+  if (key === "br") return BITRATES[value] || "?";
+  return value || "?";
+}
+
+function groups(rows, key) {
+  const map = new Map();
+  for (const r of rows) {
+    const name = groupLabel(key, r[key]);
+    if (!map.has(name)) map.set(name, []);
+    map.get(name).push(r);
+  }
+  return [...map.entries()].map(([name, list]) => ({ name, list, s: summarise(list) }))
+    .sort((a, b) => b.list.length - a.list.length);
+}
+
+function dayKey(t) { const d = new Date(t); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
+
+function perDay(rows) {
+  const days = [];
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  for (let i = state.days - 1; i >= 0; i--) {
+    const d = new Date(start.getTime() - i * 86400000);
+    days.push({ key: dayKey(d.getTime()), date: d, rows: [] });
+  }
+  const index = new Map(days.map((d) => [d.key, d]));
+  for (const r of rows) { const d = index.get(dayKey(r.t)); if (d) d.rows.push(r); }
+  return days;
+}
+
+// ---- Charts (SVG, hover tooltips) ---------------------------------------
+
+const W = 640, H = 220, M = { top: 12, right: 12, bottom: 26, left: 42 };
+
+function niceMax(v) {
+  if (!(v > 0)) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  const f = v / p;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p;
+}
+
+function frame(el, max, ticks = 4, fmtTick = (v) => v) {
+  const h = H - M.top - M.bottom;
+  let g = "";
+  for (let i = 0; i <= ticks; i++) {
+    const v = (max / ticks) * i, y = M.top + h - (v / max) * h;
+    g += `<line class="${i ? "gridline" : "baseline"}" x1="${M.left}" x2="${W - M.right}" y1="${y}" y2="${y}"/>` +
+      `<text x="${M.left - 8}" y="${y + 4}" text-anchor="end">${fmtTick(v)}</text>`;
+  }
+  return `<g class="axis">${g}</g>`;
+}
+
+function mountChart(el, svg, points, tipFor) {
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img">${svg}</svg><div class="tip"></div>`;
+  const tip = el.querySelector(".tip"), sv = el.querySelector("svg");
+  const hl = el.querySelector("[data-hover]");
+  sv.addEventListener("mousemove", (e) => {
+    const box = sv.getBoundingClientRect();
+    const x = ((e.clientX - box.left) / box.width) * W;
+    let best = null;
+    for (const p of points) if (!best || Math.abs(p.x - x) < Math.abs(best.x - x)) best = p;
+    if (!best || !tipFor(best)) { tip.style.opacity = 0; return; }
+    tip.innerHTML = tipFor(best);
+    tip.style.left = (best.x / W) * box.width + "px";
+    tip.style.top = (Math.max(best.y, M.top) / H) * box.height - 8 + "px";
+    tip.style.opacity = 1;
+    if (hl) hl.setAttribute("transform", `translate(${best.x},0)`), hl.style.opacity = 1;
+    el.querySelectorAll("[data-i]").forEach((n) => n.style.opacity = Number(n.dataset.i) === best.i ? 1 : 0.55);
+  });
+  sv.addEventListener("mouseleave", () => {
+    tip.style.opacity = 0;
+    if (hl) hl.style.opacity = 0;
+    el.querySelectorAll("[data-i]").forEach((n) => n.style.opacity = 1);
+  });
+}
+
+function columnChart(el, items, { valueLabel, digits = 0, labelEvery = 1 }) {
+  const values = items.map((d) => d.value).filter(Number.isFinite);
+  if (!values.length || values.every((v) => v === 0)) { el.innerHTML = `<svg viewBox="0 0 ${W} ${H}"><text class="empty" x="${W / 2}" y="${H / 2}" text-anchor="middle">No data in this range yet</text></svg>`; return; }
+  const max = niceMax(Math.max(...values));
+  const innerW = W - M.left - M.right, h = H - M.top - M.bottom;
+  const slot = innerW / items.length, bw = Math.max(2, Math.min(38, slot - 2));
+  let bars = "", labels = "";
+  const points = items.map((d, i) => {
+    const cx = M.left + slot * i + slot / 2;
+    const v = Number.isFinite(d.value) ? d.value : 0;
+    const bh = (v / max) * h, y = M.top + h - bh;
+    if (bh > 0) {
+      const r = Math.min(4, bw / 2, bh);
+      const x0 = cx - bw / 2, x1 = cx + bw / 2, yb = M.top + h;
+      bars += `<path data-i="${i}" fill="var(--series-1)" d="M${x0},${yb}V${y + r}Q${x0},${y} ${x0 + r},${y}H${x1 - r}Q${x1},${y} ${x1},${y + r}V${yb}Z"/>`;
+    }
+    if (i % labelEvery === 0) labels += `<text x="${cx}" y="${H - 8}" text-anchor="middle">${esc(d.short ?? d.label)}</text>`;
+    return { x: cx, y, i, d };
+  });
+  mountChart(el, frame(el, max, 4, (v) => fmt(v, max < 5 ? 1 : 0)) + bars + `<g class="axis">${labels}</g>`, points,
+    (p) => `${esc(p.d.label)}<br><b>${fmt(p.d.value, digits)}</b> <span class="k">${valueLabel}</span>` + (p.d.extra ? `<br><span class="k">${p.d.extra}</span>` : ""));
+}
+
+function lineChart(el, items, { valueLabel, digits = 0, labelEvery = 1 }) {
+  const values = items.map((d) => d.value).filter(Number.isFinite);
+  if (!values.length) { el.innerHTML = `<svg viewBox="0 0 ${W} ${H}"><text class="empty" x="${W / 2}" y="${H / 2}" text-anchor="middle">No data in this range yet</text></svg>`; return; }
+  const max = niceMax(Math.max(...values) * 1.1);
+  const innerW = W - M.left - M.right, h = H - M.top - M.bottom;
+  const step = items.length > 1 ? innerW / (items.length - 1) : 0;
+  let path = "", dots = "", labels = "", pen = false;
+  const points = items.map((d, i) => {
+    const x = M.left + step * i, ok = Number.isFinite(d.value);
+    const y = ok ? M.top + h - (d.value / max) * h : M.top + h;
+    if (ok) { path += (pen ? "L" : "M") + x + "," + y; pen = true; } else pen = false;
+    if (ok && values.length <= 31) dots += `<circle cx="${x}" cy="${y}" r="3" fill="var(--series-1)" stroke="var(--surface-1)" stroke-width="2"/>`;
+    if (i % labelEvery === 0) labels += `<text x="${x}" y="${H - 8}" text-anchor="middle">${esc(d.short)}</text>`;
+    return { x, y, i, d };
+  });
+  const cross = `<g data-hover style="opacity:0"><line x1="0" x2="0" y1="${M.top}" y2="${M.top + h}" stroke="var(--text-muted)" stroke-dasharray="3 3"/></g>`;
+  mountChart(el, frame(el, max, 4, (v) => fmt(v, 0)) + cross +
+    `<path d="${path}" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>` + dots + `<g class="axis">${labels}</g>`,
+    points, (p) => Number.isFinite(p.d.value) ? `${esc(p.d.label)}<br><b>${fmt(p.d.value, digits)}</b> <span class="k">${valueLabel}</span>` + (p.d.extra ? `<br><span class="k">${p.d.extra}</span>` : "") : `${esc(p.d.label)}<br><span class="k">no sessions</span>`);
+}
+
+// ---- Render ---------------------------------------------------------------
+
+function tile(label, value, unit = "", sub = "") {
+  return `<div class="tile"><div class="label">${label}</div><div class="value">${value}<span class="unit">${unit}</span></div>${sub ? `<div class="sub">${sub}</div>` : ""}</div>`;
+}
+
+function renderPerf() {
+  const rows = inRange(state.stats);
+  const s = summarise(rows);
+  $("tiles").innerHTML = s ? [
+    tile("Sessions", s.sessions, "", `${s.consoles} console${s.consoles === 1 ? "" : "s"}`),
+    tile("Time played", fmt(s.hours), " h"),
+    tile("Average ping", fmt(s.ping, 0), " ms", `worst avg ${fmt(s.pingMax, 0)} ms`),
+    tile("Bitrate", fmt(s.kbps / 1000, 2), " Mbps", `${fmt(s.fps)} fps`),
+    tile("Lost frames", fmt(s.lost, 2), " /min", `${fmt(s.keyframes, 2)} keyframes/min`),
+    tile("Hitches", fmt(s.hitches, 2), " /min"),
+    tile("Reconnects", fmt(s.reconnects, 2), " /h"),
+    tile("Ended in error", fmt(s.errors * 100, 0), "%", `decode ${fmt(s.decode)} ms`),
+  ].join("") : `<div class="tile" style="grid-column:1/-1"><div class="label">No sessions in the last ${state.days} days yet.</div></div>`;
+
+  const days = perDay(rows);
+  const every = Math.ceil(days.length / 8);
+  const short = (d) => d.date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  columnChart($("c-sessions"), days.map((d) => ({ label: short(d), short: short(d), value: d.rows.length })), { valueLabel: "sessions", labelEvery: every });
+  lineChart($("c-ping"), days.map((d) => {
+    const sd = summarise(d.rows);
+    return { label: short(d), short: short(d), value: sd ? sd.ping : NaN, extra: sd ? `${sd.sessions} session${sd.sessions === 1 ? "" : "s"}` : "" };
+  }), { valueLabel: "ms", labelEvery: every });
+
+  const byVersion = groups(rows, "v").sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true })).slice(-10);
+  const vShort = (v) => String(v).replace(/^0\.9\.0-/, "");
+  columnChart($("c-lost"), byVersion.map((g) => ({ label: g.name, short: vShort(g.name), value: g.s.lost, extra: `${g.s.sessions} sessions` })), { valueLabel: "lost frames / min", digits: 2 });
+  columnChart($("c-hitch"), byVersion.map((g) => ({ label: g.name, short: vShort(g.name), value: g.s.hitches, extra: `${g.s.sessions} sessions` })), { valueLabel: "hitches / min", digits: 2 });
+
+  const head = "<tr><th></th><th>Sessions</th><th>Consoles</th><th>Hours</th><th>Ping ms</th><th>Worst ping</th><th>Mbps</th><th>FPS</th><th>Wi-Fi</th><th>Lost/min</th><th>Hitches/min</th><th>Keyframes/min</th><th>Reconnects/h</th><th>Decode ms</th><th>Errors</th></tr>";
+  $("t-break").innerHTML = head + groups(rows, state.group).map(({ name, s }) =>
+    `<tr><td><b>${esc(name)}</b></td><td>${s.sessions}</td><td>${s.consoles}</td><td>${fmt(s.hours)}</td><td>${fmt(s.ping, 0)}</td><td>${fmt(s.pingMax, 0)}</td>` +
+    `<td>${fmt(s.kbps / 1000, 2)}</td><td>${fmt(s.fps)}</td><td>${fmt(s.wifi)}</td><td>${fmt(s.lost, 2)}</td><td>${fmt(s.hitches, 2)}</td>` +
+    `<td>${fmt(s.keyframes, 2)}</td><td>${fmt(s.reconnects, 2)}</td><td>${fmt(s.decode)}</td><td>${fmt(s.errors * 100, 0)}%</td></tr>`).join("");
+
+  $("t-recent").innerHTML = "<tr><th>When</th><th>Version</th><th>Game</th><th>Server</th><th>Type</th><th>Length</th><th>Ping</th><th>Mbps</th><th>FPS</th><th>Lost</th><th>Hitches</th><th>Reconnects</th><th>Ended</th><th>Console</th></tr>" +
+    rows.slice(0, 200).map((r) => {
+      const bad = r.e && r.e !== "user" && r.e !== "ended";
+      return `<tr><td>${new Date(r.t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</td>` +
+        `<td>${esc(r.v)}</td><td>${esc(r.g)}</td><td>${esc(r.r)}</td><td>${r.m ? "Weak" : "Standard"}</td><td>${Math.round((r.d || 0) / 60)} min</td>` +
+        `<td>${r.p >= 0 ? r.p : "–"}</td><td>${fmt((r.k || 0) / 1000, 2)}</td><td>${fmt((r.f || 0) / 10)}</td><td>${r.lo ?? 0}</td><td>${r.rp ?? 0}</td><td>${r.rc ?? 0}</td>` +
+        `<td><span class="pill${bad ? " bad" : ""}">${esc(r.e || "")}</span></td><td class="muted">${esc(r.i)}</td></tr>`;
+    }).join("");
+}
+
+function renderReports() {
+  const since = Date.now() - state.days * 86400000;
+  const rows = state.reports.filter((r) => Date.parse(r.at) >= since);
+  $("t-reports").innerHTML = "<tr><th>Code</th><th>Sent</th><th>Why</th><th>Version</th><th>Console</th><th></th></tr>" +
+    (rows.length ? rows.map((r) =>
+      `<tr class="row" tabindex="0" data-code="${esc(r.code)}"><td><b>${esc(r.code.slice(0, 3) + "-" + r.code.slice(3))}</b></td>` +
+      `<td>${new Date(r.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</td>` +
+      `<td><span class="pill${r.trigger && r.trigger !== "manual" ? " bad" : ""}">${esc(r.trigger || "manual")}</span></td><td>${esc(r.version)}</td>` +
+      `<td class="muted">${esc(r.install || "")}</td><td>${r.dump ? '<span class="pill dump">dump</span>' : ""}</td></tr>`).join("")
+      : `<tr><td colspan="6" class="muted">No reports in the last ${state.days} days.</td></tr>`);
+  $("t-reports").querySelectorAll(".row").forEach((row) => {
+    const open = () => openReport(row.dataset.code);
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
+  });
+}
+
+async function openReport(code) {
+  const meta = state.reports.find((r) => r.code === code) || {};
+  state.report = code;
+  $("v-title").textContent = `Report ${code.slice(0, 3)}-${code.slice(3)}`;
+  $("v-body").textContent = "Loading…";
+  $("v-dump").classList.toggle("hidden", !meta.dump);
+  try {
+    $("v-body").textContent = await api("/report/" + code, "text");
+  } catch (error) {
+    $("v-body").textContent = error.message;
+  }
+}
+
+$("v-dump").addEventListener("click", async () => {
+  if (!state.report) return;
+  try {
+    const blob = await api(`/report/${state.report}/dump`, "blob");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${state.report}-crash_dump.dmp`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+function render() {
+  $("perf").classList.toggle("hidden", state.tab !== "perf");
+  $("reports").classList.toggle("hidden", state.tab !== "reports");
+  if (state.tab === "perf") renderPerf(); else renderReports();
+}
+
+function pressOnly(group, button) {
+  group.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b === button)));
+}
+
+document.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
+  state.tab = b.dataset.tab; pressOnly(b.parentElement, b); store("kasumi-tab", state.tab);
+  if (state.key && (state.stats.length || state.reports.length)) render();
+}));
+$("range").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+  state.days = Number(b.dataset.days); pressOnly($("range"), b); store("kasumi-days", String(state.days));
+  if (state.key && (state.stats.length || state.reports.length)) render();
+}));
+$("groupby").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+  state.group = b.dataset.g; pressOnly($("groupby"), b);
+  if (state.stats.length) renderPerf();
+}));
+$("refresh").addEventListener("click", load);
+$("keyform").addEventListener("submit", (e) => {
+  e.preventDefault();
+  state.key = $("key").value.trim();
+  store("kasumi-key", $("remember").checked ? state.key : null);
+  load();
+});
+
+// Restore the conveniences saved on this PC.
+(function restore() {
+  const days = Number(recall("kasumi-days"));
+  if ([7, 30, 90].includes(days)) { state.days = days; pressOnly($("range"), $("range").querySelector(`[data-days="${days}"]`)); }
+  const tab = recall("kasumi-tab");
+  if (tab === "reports" || tab === "perf") { state.tab = tab; pressOnly(document.querySelector("[data-tab]").parentElement, document.querySelector(`[data-tab="${tab}"]`)); }
+  const key = recall("kasumi-key");
+  if (key) { state.key = key; $("key").value = key; $("remember").checked = true; load(); }
+})();
+</script>
+</body>
+</html>
