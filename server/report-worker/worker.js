@@ -193,6 +193,7 @@ async function view(url, env, code, wantDump) {
     "===== settings.json =====",
     report.settings || "(none)",
     "",
+    ...(report.log_older ? ["===== current log, earlier part (this run) =====", report.log_older, ""] : []),
     "===== current log (this run) =====",
     report.log || "(empty)",
     "",

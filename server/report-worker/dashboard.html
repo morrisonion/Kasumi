@@ -146,6 +146,7 @@
       <button type="button" data-days="90" aria-pressed="false">90 days</button>
     </div>
     <button type="button" id="refresh" title="Reload data">↻ Refresh</button>
+    <button type="button" id="export" title="Download all sessions and report logs as one JSON file">⤓ Export all</button>
     <span class="status" id="status">Enter your admin key to load data.</span>
   </div>
 
@@ -501,6 +502,31 @@ $("groupby").querySelectorAll("button").forEach((b) => b.addEventListener("click
   if (state.stats.length) renderPerf();
 }));
 $("refresh").addEventListener("click", load);
+
+// Everything in one file (sessions, report list, every report's log) for
+// offline analysis. The key is not included.
+$("export").addEventListener("click", async () => {
+  if (!state.key) { setStatus("Enter your admin key first.", true); return; }
+  try {
+    setStatus("Exporting…");
+    const [stats, reports] = await Promise.all([api("/api/stats?days=90"), api("/api/reports")]);
+    const logs = {};
+    let done = 0;
+    for (const r of reports.rows || []) {
+      try { logs[r.code] = await api("/report/" + r.code, "text"); } catch (error) { logs[r.code] = "(could not load: " + error.message + ")"; }
+      setStatus(`Exporting… ${++done}/${(reports.rows || []).length} reports`);
+    }
+    const file = { exported_at: new Date().toISOString(), sessions: stats.rows || [], reports: reports.rows || [], report_logs: logs };
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(file, null, 1)], { type: "application/json" }));
+    a.download = "kasumi-export-" + new Date().toISOString().slice(0, 10) + ".json";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    setStatus(`Exported ${file.sessions.length} sessions and ${file.reports.length} reports`);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
 $("keyform").addEventListener("submit", (e) => {
   e.preventDefault();
   state.key = $("key").value.trim();
