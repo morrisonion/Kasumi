@@ -339,9 +339,23 @@ void regions_resolve(char *url, size_t size)
     if (!regions_measured_here()) regions_measure();
     const int best = regions_fastest();
     Region region;
-    if (best >= 0 && regions_get((unsigned)best, &region)) {
+    char local[40];
+    LightLock_Lock(&g_lock);
+    snprintf(local, sizeof(local), "%s", g_local);
+    LightLock_Unlock(&g_lock);
+    if (best >= 0 && regions_get((unsigned)best, &region) && !strcmp(region.name, local)) {
+        /* NVIDIA's own region is the fastest: go through NVIDIA's normal
+         * address, which balances the queue across its servers. Queued
+         * sessions made straight at the regional address sat frozen for two
+         * minutes and were dropped as SESSION_REQUEST_IN_QUEUE_ABANDONED
+         * (beta.17: Germany at place 26, N. California at 21), while the
+         * retry through the normal address moved and streamed. */
+        diagnostic_log("REGION", "server=auto NVIDIA's pick %s is fastest (%d ms)", region.name, region.ms);
+        set_last_used(region.name);
+    } else if (best >= 0 && regions_get((unsigned)best, &region)) {
         snprintf(url, size, "%s", region.url);
-        diagnostic_log("REGION", "server=auto %s %d ms", region.name, region.ms);
+        diagnostic_log("REGION", "server=auto %s %d ms (NVIDIA's pick: %s)", region.name, region.ms,
+                       local[0] ? local : "unknown");
         set_last_used(region.name);
     } else {
         diagnostic_log("REGION", "server=auto: no measurement; NVIDIA default");

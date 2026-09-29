@@ -227,10 +227,17 @@ Not yet. In some countries GeForce NOW is run by a local partner (the
 GeForce NOW Alliance) with its own accounts and servers; Kasumi only works
 with NVIDIA's own service for now.
 
-**"Launch failed: CloudMatch HTTP 429"?**
-NVIDIA's servers are refusing new sessions for a moment. Close GeForce NOW on
-any other device or browser tab, wait a few minutes, and try again. Launching
-several games quickly in a row can trigger it.
+**"Launch failed" with HTTP 403, 429 or 500?**
+- **403 (session limit)**: a previous session had not fully closed on
+  NVIDIA's side. Since 0.9.0-beta.18 Kasumi closes such leftover sessions by
+  itself; if it still appears, wait a minute and make sure GeForce NOW is not
+  open on another device or browser tab.
+- **429 (too many requests)**: NVIDIA is limiting launch attempts after
+  several in a row. Wait a minute; Kasumi pauses launches for you.
+- **500 "limited mode"**: NVIDIA has restricted streaming on the account
+  itself. Check whether it can play on
+  [play.geforcenow.com](https://play.geforcenow.com); if not, the account needs
+  sorting out with NVIDIA.
 
 **Does it run on an emulator (Citra / Azahar)?**
 No. Kasumi needs the New 3DS hardware video decoder and a real network

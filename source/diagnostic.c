@@ -18,6 +18,10 @@ enum {
 };
 static unsigned g_lines;
 static unsigned g_dropped;
+/* The log hit DIAGNOSTIC_MAX_LINES: the writer moves the file aside and
+ * starts a new one. It used to stop writing instead, so a long session lost
+ * its end, the part a crash report needs (beta.17 report M7NC4E). */
+static bool g_roll_pending;
 static uint64_t g_started_ms;
 static FILE *g_file;
 /* Two buffers: loggers append to the active one while the writer drains
@@ -42,7 +46,20 @@ static void write_pending(void)
     const size_t size = g_chunk_used[full];
     g_active ^= 1;
     g_chunk_used[g_active] = 0;
+    const bool roll = g_roll_pending;
+    g_roll_pending = false;
     LightLock_Unlock(&g_log_lock);
+    if (roll && g_file) {
+        fclose(g_file);
+        remove(DIAGNOSTIC_OLDER_PATH);
+        rename(DIAGNOSTIC_PATH, DIAGNOSTIC_OLDER_PATH);
+        g_file = fopen(DIAGNOSTIC_PATH, "w");
+        if (g_file) {
+            fputs(APP_NAME " " APP_VERSION " (build " APP_BUILD ") diagnostic, continued "
+                  "(earlier lines: kasumi-diagnostic-older.txt)\n", g_file);
+            fflush(g_file);
+        }
+    }
     if (size && g_file) {
         fwrite(g_chunks[full], 1, size, g_file);
         fflush(g_file);
@@ -75,6 +92,8 @@ void diagnostic_init(void)
      * freeze that is the one worth reading. */
     remove(DIAGNOSTIC_PREVIOUS_PATH);
     rename(DIAGNOSTIC_PATH, DIAGNOSTIC_PREVIOUS_PATH);
+    remove(DIAGNOSTIC_OLDER_PATH);
+    g_roll_pending = false;
     g_file = fopen(DIAGNOSTIC_PATH, "w");
     if (!g_file) return;
     fputs(APP_NAME " " APP_VERSION " (build " APP_BUILD ") diagnostic\n", g_file);
@@ -127,7 +146,11 @@ void diagnostic_vlog(const char *component, const char *format, va_list args)
 
     /* The UI thread, decoder and network worker all log; keep lines whole. */
     LightLock_Lock(&g_log_lock);
-    if (g_lines < DIAGNOSTIC_MAX_LINES) {
+    if (g_lines >= DIAGNOSTIC_MAX_LINES) {
+        g_lines = 0;
+        g_roll_pending = true;
+    }
+    {
         size_t *used = &g_chunk_used[g_active];
         if (*used + (size_t)n <= DIAGNOSTIC_CHUNK) {
             memcpy(g_chunks[g_active] + *used, line, (size_t)n);

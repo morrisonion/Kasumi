@@ -1370,7 +1370,15 @@ static void track_session(void)
     static bool was_active;
     if (!gfn_session_active(&g_client)) {
         finish_history();
-        if (g_perf.active) perf_end(g_app.settings.install_id);
+        if (g_perf.active) {
+            perf_end(g_app.settings.install_id);
+            /* A clearly choppy session on Standard: point at Weak / hotspot
+             * (beta.17 stats: one console lost ~5 frames a minute). */
+            const unsigned minutes = g_perf.seconds / 60;
+            if (minutes >= 2 && !g_app.settings.net_weak &&
+                (g_perf.lost / minutes >= 3 || g_perf.repeated / minutes >= 15))
+                show_notice("Choppy connection? Try Settings > Network > Connection type: Weak / hotspot");
+        }
         /* A game's own options only last for its session. */
         if (was_active) {
             was_active = false;
@@ -2103,6 +2111,12 @@ int main(int argc, char **argv)
         close_media();
         net_worker_wait_idle(8000);
         if (net_worker_submit(NET_JOB_STOP_SESSION, NULL, NULL)) net_worker_wait_idle(8000);
+    }
+    /* A session summary still waiting (closing right after playing is
+     * common): one quick try, else it goes out on the next start. */
+    if (g_app.settings.share_stats && report_available() && report_stats_pending()) {
+        net_worker_wait_idle(3000);
+        if (net_worker_submit(NET_JOB_SEND_STATS, NULL, NULL)) net_worker_wait_idle(3000);
     }
     aptSetSleepAllowed(true);
     net_worker_stop();

@@ -1003,8 +1003,27 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
     json_t *code_value = json_is_object(request_status) ? json_object_get(request_status, "statusCode") : NULL;
     const int status_code = json_is_integer(code_value) ? (int)json_integer_value(code_value) : -1;
     if (response->status < 200 || response->status >= 300 || status_code != 1) {
-        snprintf(client->status, sizeof(client->status), "%s: CloudMatch HTTP %ld code %d",
-                 operation, response->status, status_code);
+        json_t *reason_value = json_is_object(request_status) ? json_object_get(request_status, "statusDescription") : NULL;
+        const char *reason = json_is_string(reason_value) ? json_string_value(reason_value) : "";
+        /* NVIDIA's reasons, in words a player can act on. */
+        if (strstr(reason, "LIMITED_MODE"))
+            snprintf(client->status, sizeof(client->status),
+                     "NVIDIA has this account in limited mode, so it can't start games right now. "
+                     "Check that it plays on play.geforcenow.com (code %d).", status_code);
+        else if (strstr(reason, "ENTITLEMENT"))
+            snprintf(client->status, sizeof(client->status),
+                     "NVIDIA says this account can't stream here. Your country may be served by a local "
+                     "GeForce NOW partner, or the game isn't available to it (code %d).", status_code);
+        else if (strstr(reason, "NO_CAPACITY") || strstr(reason, "CAPACITY"))
+            snprintf(client->status, sizeof(client->status),
+                     "NVIDIA has no free rigs for this right now. Try again in a few minutes (code %d).", status_code);
+        else if (strstr(reason, "SESSION_LIMIT") || strstr(reason, "MAX_SESSION"))
+            snprintf(client->status, sizeof(client->status),
+                     "Another GeForce NOW session is running on this account. Close it and try again (code %d).",
+                     status_code);
+        else
+            snprintf(client->status, sizeof(client->status), "%s: CloudMatch HTTP %ld code %d %.60s",
+                     operation, response->status, status_code, reason);
         client->session_state = GFN_SESSION_ERROR;
         json_decref(root);
         return false;
@@ -1148,59 +1167,173 @@ static void cloudmatch_log_response(const char *operation, const HttpResponse *r
  * menu close, power loss, or crash can skip our normal DELETE and leave a rig
  * occupying that slot.  Current OpenNOW Vita performs this bounded cleanup
  * before each create request as well. */
-static void cloudmatch_cleanup_stale_sessions(GfnClient *client,
-                                              const char **headers,
-                                              size_t header_count)
-{
-    char list_url[384];
-    snprintf(list_url, sizeof(list_url), "%s/v2/session", client->session_base_url);
-    HttpResponse list_response;
-    if (!http_request("GET", list_url, GFN_UA, headers, header_count,
-                      NULL, 1024 * 1024, &list_response)) {
-        diagnostic_log("CLOUDMATCH", "preflight list transport failure");
-        return;
-    }
-    cloudmatch_log_response("preflight-list", &list_response);
-    if (list_response.status < 200 || list_response.status >= 300) {
-        http_response_free(&list_response);
-        return;
-    }
+/* ---- Leftover ("zombie") sessions ------------------------------------------
+ *
+ * CloudMatch counts every session in setup, queue or play against a limit per
+ * device. A session only lives on the server that created it, so the check
+ * covers the chosen region and NVIDIA's own entry point. Beta.17 reports
+ * showed three consoles refused dozens of times with
+ * SESSION_LIMIT_PER_DEVICE_EXCEEDED while the one server we asked listed
+ * nothing, then rate limited for retrying. Like OpenNOW, Kasumi now stops the
+ * sessions the refusal names, waits until CloudMatch confirms the slot is
+ * free, and tries again. */
 
-    json_error_t error;
-    json_t *root = json_loadb(list_response.body ? list_response.body : "",
-                              list_response.size, 0, &error);
-    json_t *sessions = root ? json_object_get(root, "sessions") : NULL;
-    unsigned active = 0, stopped = 0;
-    size_t index;
-    json_t *session;
-    json_array_foreach(sessions, index, session) {
-        char session_id[160] = "";
-        flexible_json_text(session_id, sizeof(session_id),
-                           json_object_get(session, "sessionId"));
-        const int status = parse_session_status(json_object_get(session, "status"));
-        if (!session_id[0] || status < 0 || status > 3)
-            continue;
-        active++;
-        char delete_url[512];
-        snprintf(delete_url, sizeof(delete_url), "%s/v2/session/%s",
-                 client->session_base_url, session_id);
-        HttpResponse delete_response;
-        if (http_request("DELETE", delete_url, GFN_UA, headers, header_count,
-                         NULL, 256 * 1024, &delete_response)) {
-            diagnostic_log("CLOUDMATCH", "preflight-delete index=%u status=%d http=%ld",
-                           active, status, delete_response.status);
-            if ((delete_response.status >= 200 && delete_response.status < 300) ||
-                delete_response.status == 404)
-                stopped++;
-            http_response_free(&delete_response);
-        }
-    }
-    diagnostic_log("CLOUDMATCH", "preflight active=%u stopped=%u", active, stopped);
-    if (root) json_decref(root);
-    http_response_free(&list_response);
-    if (stopped)
-        svcSleepThread(3000000000LL);
+#define ZOMBIE_MAX 8
+
+typedef struct {
+    const char *bases[2];
+    unsigned base_count;
+} CloudBases;
+
+static CloudBases cloud_bases(const GfnClient *client)
+{
+    CloudBases b = { { client->session_base_url, REGION_NVIDIA_URL }, 1 };
+    if (strcmp(client->session_base_url, REGION_NVIDIA_URL)) b.base_count = 2;
+    return b;
 }
+
+/* Active session IDs on one server (status 0-3 counts against the limit). */
+static unsigned cloudmatch_list_active(const char *base, const char **headers, size_t header_count,
+                                       char ids[][160], unsigned max, bool *ok)
+{
+    char url[384];
+    snprintf(url, sizeof(url), "%s/v2/session", base);
+    HttpResponse response;
+    *ok = false;
+    if (!http_request("GET", url, GFN_UA, headers, header_count, NULL, 1024 * 1024, &response)) return 0;
+    unsigned count = 0;
+    if (response.status >= 200 && response.status < 300) {
+        *ok = true;
+        json_error_t error;
+        json_t *root = json_loadb(response.body ? response.body : "", response.size, 0, &error);
+        json_t *sessions = root ? json_object_get(root, "sessions") : NULL;
+        size_t index;
+        json_t *session;
+        json_array_foreach(sessions, index, session) {
+            if (count >= max) break;
+            const int status = parse_session_status(json_object_get(session, "status"));
+            if (status < 0 || status > 3) continue;
+            flexible_json_text(ids[count], 160, json_object_get(session, "sessionId"));
+            if (ids[count][0]) ++count;
+        }
+        json_decref(root);
+    }
+    http_response_free(&response);
+    return count;
+}
+
+/* DELETE on every server; true when it is gone (deleted, or 404 everywhere). */
+static bool cloudmatch_stop_everywhere(const CloudBases *bases, const char *id, const char **headers,
+                                       size_t header_count)
+{
+    bool missing_everywhere = true;
+    for (unsigned i = 0; i < bases->base_count; ++i) {
+        char url[512];
+        snprintf(url, sizeof(url), "%s/v2/session/%s", bases->bases[i], id);
+        HttpResponse response;
+        if (!http_request("DELETE", url, GFN_UA, headers, header_count, NULL, 256 * 1024, &response)) {
+            missing_everywhere = false;
+            continue;
+        }
+        const long status = response.status;
+        http_response_free(&response);
+        diagnostic_log("CLOUDMATCH", "stop leftover session at %s: http=%ld", i ? "NVIDIA default" : "chosen server",
+                       status);
+        if (status >= 200 && status < 300) return true;
+        if (status != 404) missing_everywhere = false;
+    }
+    return missing_everywhere;
+}
+
+/* Up to ~24 s for CloudMatch to release stopped sessions. */
+static bool cloudmatch_wait_clear(const CloudBases *bases, const char **headers, size_t header_count)
+{
+    for (int check = 1; check <= 8; ++check) {
+        svcSleepThread(3000000000LL);
+        unsigned remaining = 0;
+        bool all_ok = true;
+        for (unsigned i = 0; i < bases->base_count; ++i) {
+            char ids[ZOMBIE_MAX][160];
+            bool ok = false;
+            remaining += cloudmatch_list_active(bases->bases[i], headers, header_count, ids, ZOMBIE_MAX, &ok);
+            all_ok = all_ok && ok;
+        }
+        if (!remaining) {
+            diagnostic_log("CLOUDMATCH", "device slot clear after %ds%s", check * 3, all_ok ? "" : " (unconfirmed)");
+            return true;
+        }
+        diagnostic_log("CLOUDMATCH", "waiting for %u leftover session(s) to close", remaining);
+    }
+    return false;
+}
+
+/* Before a launch: stop anything still open on this device. */
+static void cloudmatch_cleanup_stale_sessions(GfnClient *client, const char **headers, size_t header_count)
+{
+    const CloudBases bases = cloud_bases(client);
+    unsigned active = 0, stopped = 0;
+    for (unsigned i = 0; i < bases.base_count; ++i) {
+        char ids[ZOMBIE_MAX][160];
+        bool ok = false;
+        const unsigned count = cloudmatch_list_active(bases.bases[i], headers, header_count, ids, ZOMBIE_MAX, &ok);
+        active += count;
+        for (unsigned j = 0; j < count; ++j)
+            if (cloudmatch_stop_everywhere(&bases, ids[j], headers, header_count)) ++stopped;
+    }
+    diagnostic_log("CLOUDMATCH", "preflight active=%u stopped=%u servers=%u", active, stopped, bases.base_count);
+    if (stopped) cloudmatch_wait_clear(&bases, headers, header_count);
+}
+
+static bool is_session_limit(const HttpResponse *response)
+{
+    if (!response->body) return false;
+    return strstr(response->body, "SESSION_LIMIT") != NULL;
+}
+
+/* The refusal names the sessions in the way: its "session" and
+ * "otherUserSessions". Stop them (and anything listed), then wait. */
+static bool cloudmatch_clear_limit(GfnClient *client, const HttpResponse *refusal, const char **headers,
+                                   size_t header_count)
+{
+    const CloudBases bases = cloud_bases(client);
+    char ids[ZOMBIE_MAX][160];
+    unsigned count = 0;
+    json_error_t error;
+    json_t *root = json_loadb(refusal->body ? refusal->body : "", refusal->size, 0, &error);
+    json_t *session = root ? json_object_get(root, "session") : NULL;
+    if (json_is_object(session) && count < ZOMBIE_MAX) {
+        flexible_json_text(ids[count], 160, json_object_get(session, "sessionId"));
+        if (ids[count][0]) ++count;
+    }
+    json_t *others = root ? json_object_get(root, "otherUserSessions") : NULL;
+    size_t index;
+    json_t *other;
+    json_array_foreach(others, index, other) {
+        if (count >= ZOMBIE_MAX) break;
+        flexible_json_text(ids[count], 160, json_object_get(other, "sessionId"));
+        if (ids[count][0]) ++count;
+    }
+    json_decref(root);
+    for (unsigned i = 0; i < bases.base_count && count < ZOMBIE_MAX; ++i) {
+        bool ok = false;
+        count += cloudmatch_list_active(bases.bases[i], headers, header_count, ids + count, ZOMBIE_MAX - count, &ok);
+    }
+    diagnostic_log("CLOUDMATCH", "session limit: %u leftover session(s) named", count);
+    bool stopped_any = false;
+    for (unsigned i = 0; i < count; ++i) {
+        bool duplicate = false;
+        for (unsigned j = 0; j < i; ++j) duplicate = duplicate || !strcmp(ids[i], ids[j]);
+        if (duplicate) continue;
+        if (cloudmatch_stop_everywhere(&bases, ids[i], headers, header_count)) stopped_any = true;
+    }
+    if (!stopped_any) return false;
+    snprintf(client->status, sizeof(client->status), "Closing your previous session...");
+    return cloudmatch_wait_clear(&bases, headers, header_count);
+}
+
+/* After a 429 (REQUEST_LIMIT_EXCEEDED), launches wait instead of adding to
+ * the pile (beta.17: 36 refused retries in a row). */
+static int64_t g_launch_blocked_until;
 
 bool gfn_start_session(GfnClient *client, const GfnGame *game)
 {
@@ -1241,23 +1374,38 @@ bool gfn_start_session(GfnClient *client, const GfnGame *game)
              client->session_base_url);
     const char *headers[16]; char client_header[80], device_header[80];
     const size_t count = cloudmatch_headers(client, headers, client_header, device_header);
+    const int64_t now = (int64_t)time(NULL);
+    if (now < g_launch_blocked_until) {
+        snprintf(client->status, sizeof(client->status),
+                 "NVIDIA is limiting launch attempts. Try again in %lld s.", (long long)(g_launch_blocked_until - now));
+        client->session_state = GFN_SESSION_ERROR;
+        free(body);
+        return false;
+    }
     cloudmatch_cleanup_stale_sessions(client, headers, count);
     HttpResponse response;
     bool sent = false;
-    int attempt = 0;
-    for (attempt = 1; attempt <= 3; ++attempt) {
-        sent = http_request("POST", url, GFN_UA, headers, count, body, 1024 * 1024, &response);
-        diagnostic_log("CLOUDMATCH", "create attempt=%d transport=%d http=%ld bytes=%lu",
-                       attempt, sent ? 1 : 0, sent ? response.status : 0,
-                       sent ? (unsigned long)response.size : 0);
-        if (sent)
-            cloudmatch_log_response("create-response", &response);
-        if (!sent || !cloudmatch_status_is_transient(response.status) || attempt == 3)
-            break;
+    for (int cleanup = 0;; ++cleanup) {
+        for (int attempt = 1; attempt <= 3; ++attempt) {
+            sent = http_request("POST", url, GFN_UA, headers, count, body, 1024 * 1024, &response);
+            diagnostic_log("CLOUDMATCH", "create attempt=%d transport=%d http=%ld bytes=%lu",
+                           attempt, sent ? 1 : 0, sent ? response.status : 0,
+                           sent ? (unsigned long)response.size : 0);
+            if (sent)
+                cloudmatch_log_response("create-response", &response);
+            /* A rate limit is not helped by asking again at once. */
+            if (!sent || !cloudmatch_status_is_transient(response.status) || response.status == 429 || attempt == 3)
+                break;
+            http_response_free(&response);
+            snprintf(client->status, sizeof(client->status),
+                     "CloudMatch HTTP retry %d/3", attempt + 1);
+            svcSleepThread((s64)attempt * 2000000000LL);
+        }
+        if (!sent || cleanup >= 2 || !is_session_limit(&response)) break;
+        const bool cleared = cloudmatch_clear_limit(client, &response, headers, count);
+        if (!cleared) break;
         http_response_free(&response);
-        snprintf(client->status, sizeof(client->status),
-                 "CloudMatch HTTP retry %d/3", attempt + 1);
-        svcSleepThread((s64)attempt * 2000000000LL);
+        diagnostic_log("CLOUDMATCH", "retrying the launch after closing leftover sessions");
     }
     free(body);
     if (!sent) {
@@ -1265,9 +1413,24 @@ bool gfn_start_session(GfnClient *client, const GfnGame *game)
         client->session_state = GFN_SESSION_ERROR;
         return false;
     }
+    if (response.status == 429) {
+        g_launch_blocked_until = (int64_t)time(NULL) + 60;
+        snprintf(client->status, sizeof(client->status),
+                 "NVIDIA is limiting launch attempts for a moment. Try again in a minute.");
+        client->session_state = GFN_SESSION_ERROR;
+        http_response_free(&response);
+        return false;
+    }
     if (cloudmatch_status_is_transient(response.status)) {
         snprintf(client->status, sizeof(client->status),
                  "Create: CloudMatch HTTP %ld; press A to retry", response.status);
+        client->session_state = GFN_SESSION_ERROR;
+        http_response_free(&response);
+        return false;
+    }
+    if (is_session_limit(&response)) {
+        snprintf(client->status, sizeof(client->status),
+                 "Your previous session is still closing on NVIDIA's side. Wait a minute, then try again.");
         client->session_state = GFN_SESSION_ERROR;
         http_response_free(&response);
         return false;

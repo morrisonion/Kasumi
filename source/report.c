@@ -4,6 +4,7 @@
 #include <dirent.h>
 #include <jansson.h>
 #include <mbedtls/base64.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,8 @@
 #define DUMP_DIR "sdmc:/luma/dumps/arm11"
 #define DUMP_MAX_AGE (3 * 24 * 3600)
 #define DUMP_CAP (64 * 1024)
+/* The installed CIA's title (APP_UNIQUE_ID 0x4B534). */
+#define KASUMI_TITLE_ID 0x0004000004B53400ULL
 
 static char g_code[16];
 static char g_error[96];
@@ -44,7 +47,7 @@ bool report_send_stats(void)
     if (!summary) return false;
     static const char *const headers[] = { "Content-Type: application/json" };
     HttpResponse response;
-    http_next_request(15, NULL, NULL);
+    http_next_request(5, NULL, NULL); /* ~1 KB: never worth a long wait */
     const bool sent = http_request("POST", STATS_URL, "Kasumi-3DS", headers, 1, summary, 4096, &response);
     const long status = response.status;
     http_response_free(&response);
@@ -157,12 +160,31 @@ static char *base64(const unsigned char *data, size_t length)
 }
 
 /* The newest Luma ARM11 crash dump from the last few days, if any. */
+/* Whether a Luma ARM11 dump is of Kasumi: its extra data holds the process
+ * name (8 bytes) and title ID. Dumps of other apps are no use here (report
+ * TYQJP7 carried a crash of a GTA port from the same console). */
+static bool dump_is_kasumi(const unsigned char *data, size_t length)
+{
+    uint32_t header[10];
+    if (length < sizeof(header)) return false;
+    memcpy(header, data, sizeof(header));
+    if (header[0] != 0xDEADC0DEu || header[1] != 0xDEADCAFEu) return false;
+    if ((header[3] & 0xFFFF) != 11) return false; /* ARM11 */
+    const size_t extra = 40 + (size_t)header[6] + header[7] + header[8];
+    if ((size_t)header[9] < 16 || extra + 16 > length) return false;
+    uint64_t title = 0;
+    memcpy(&title, data + extra + 8, sizeof(title));
+    return !memcmp(data + extra, APP_NAME, strlen(APP_NAME)) || title == KASUMI_TITLE_ID;
+}
+
+/* The newest Luma ARM11 crash dump of Kasumi from the last few days. */
 static json_t *recent_dump(void)
 {
     DIR *dir = opendir(DUMP_DIR);
     if (!dir) return NULL;
     char best[64] = "";
     time_t best_time = 0;
+    const time_t now = time(NULL);
     struct dirent *entry;
     while ((entry = readdir(dir))) {
         /* Luma names them crash_dump_00000033.dmp; skip anything else. */
@@ -171,15 +193,19 @@ static json_t *recent_dump(void)
         snprintf(path, sizeof(path), "%s/%.63s", DUMP_DIR, entry->d_name);
         struct stat st;
         if (stat(path, &st) || st.st_size <= 0 || st.st_size > DUMP_CAP) continue;
-        if (!best[0] || st.st_mtime > best_time || (st.st_mtime == best_time && strcmp(entry->d_name, best) > 0)) {
-            snprintf(best, sizeof(best), "%.63s", entry->d_name);
-            best_time = st.st_mtime;
-        }
+        if (st.st_mtime && now - st.st_mtime > DUMP_MAX_AGE) continue;
+        if (best[0] && (st.st_mtime < best_time || (st.st_mtime == best_time && strcmp(entry->d_name, best) < 0)))
+            continue;
+        size_t length = 0;
+        char *data = read_file(path, DUMP_CAP, &length);
+        const bool ours = data && dump_is_kasumi((const unsigned char *)data, length);
+        free(data);
+        if (!ours) continue;
+        snprintf(best, sizeof(best), "%.63s", entry->d_name);
+        best_time = st.st_mtime;
     }
     closedir(dir);
     if (!best[0]) return NULL;
-    const time_t now = time(NULL);
-    if (best_time && now - best_time > DUMP_MAX_AGE) return NULL;
     char path[160];
     snprintf(path, sizeof(path), "%s/%s", DUMP_DIR, best);
     size_t length = 0;
@@ -257,6 +283,7 @@ bool report_send(const char *trigger)
                              "build", APP_BUILD, "sent_at", sent_at, "trigger", trigger);
     if (!root) return fail("Out of memory");
     json_object_set_new(root, "log", scrubbed_file(DIAGNOSTIC_PATH));
+    json_object_set_new(root, "log_older", scrubbed_file(DIAGNOSTIC_OLDER_PATH));
     json_object_set_new(root, "previous_log", scrubbed_file(DIAGNOSTIC_PREVIOUS_PATH));
     json_t *settings = scrubbed_file(APP_DATA_DIR "/settings.json");
     json_error_t parse_error;
