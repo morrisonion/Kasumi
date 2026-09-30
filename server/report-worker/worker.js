@@ -281,7 +281,7 @@ async function submitStats(request, env) {
 // session summaries.
 
 const LAUNCH_FIELDS = {
-  v: "string", b: "string", i: "string", r: "string", o: "string",
+  v: "string", b: "string", i: "string", r: "string", o: "string", pv: "string",
   q: "number", qp: "number", s: "number", ff: "number", ad: "number", c: "number",
   rs: "number", m: "number", aw: "number",
 };
