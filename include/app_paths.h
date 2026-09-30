@@ -1,7 +1,7 @@
 #pragma once
 
 #define APP_NAME "Kasumi"
-#define APP_BUILD "88"
+#define APP_BUILD "89"
 /* Set by the Makefile from VERSION_MAJOR / MINOR / MICRO / SUFFIX. */
 #ifndef APP_VERSION
 #define APP_VERSION "0.0.0-dev"
@@ -14,6 +14,7 @@
 #define REPORT_BASE "https://kasumi-reports.p0mpurin.workers.dev"
 #define REPORT_URL REPORT_BASE "/report"
 #define STATS_URL REPORT_BASE "/stats"
+#define LAUNCHES_URL REPORT_BASE "/launches"
 /* The project was called OpenNOW-3DS before it was renamed to Kasumi. */
 #define APP_LEGACY_DATA_DIR "sdmc:/3ds/opennow-3ds"
 

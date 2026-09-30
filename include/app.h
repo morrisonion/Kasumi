@@ -32,7 +32,11 @@ typedef enum {
     MODAL_SEND_REPORT,
     MODAL_REPORT_SENT,
     /* Asked once: send reports automatically when something goes wrong? */
-    MODAL_SHARE_ASK
+    MODAL_SHARE_ASK,
+    /* Another GeForce NOW session holds the slot: resume it or end it. */
+    MODAL_CONFLICT,
+    /* Waiting for NVIDIA to free the slot; the launch retries on a timer. */
+    MODAL_LIMIT_WAIT
 } AppModal;
 
 typedef enum {
@@ -178,6 +182,17 @@ typedef struct {
     bool free_tier_guess;
     /* Automatic reconnects after the connection dropped mid-game. */
     unsigned reconnect_attempt;
+    /* The signalling said the session is gone: one check with CloudMatch
+     * (it may only be paused) before giving up. */
+    bool recover_tried;
+    /* Launch waiting for NVIDIA to free the slot: give up at `until`, next
+     * try at `retry_at` (0 = not waiting). */
+    u64 limit_wait_until, limit_retry_at;
+    /* The conflicting session is this same game (Resume) or another (End). */
+    bool conflict_same_game;
+    /* Weak / hotspot switched on for this session because the last one on
+     * this network was choppy. */
+    bool auto_weak;
     /* Estimated seconds left in NVIDIA's queue (-1 unknown, 0 any moment). */
     int queue_eta;
     /* The most recently played library game (-1 none), for "Continue". */

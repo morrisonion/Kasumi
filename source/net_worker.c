@@ -75,6 +75,8 @@ static bool run_job(NetJobKind kind, const char *text, const GfnGame *game)
         return gfn_fetch_library(&g_work);
     case NET_JOB_SEARCH: return gfn_search_catalog(&g_work, text);
     case NET_JOB_START_SESSION:
+        /* "retry": a timed retry while NVIDIA frees the slot. */
+        g_work.limit_quiet = !strcmp(text, "retry");
         if (!gfn_start_session(&g_work, game)) return false;
         gfn_active_save(&g_work, game);
         return true;
@@ -102,6 +104,15 @@ static bool run_job(NetJobKind kind, const char *text, const GfnGame *game)
         g_signal_starting = false;
         return ok;
     }
+    case NET_JOB_CLAIM_CONFLICT:
+        if (!gfn_claim_conflict(&g_work)) return false;
+        gfn_active_save(&g_work, game);
+        return true;
+    case NET_JOB_END_CONFLICT:
+        if (!gfn_end_conflict(&g_work, game)) return false;
+        gfn_active_save(&g_work, game);
+        return true;
+    case NET_JOB_RECOVER: return gfn_recover_session(&g_work, game);
     case NET_JOB_SIGN_OUT:
         gfn_sign_out(&g_work);
         return true;

@@ -40,6 +40,15 @@ typedef struct {
     unsigned variant_selected;
 } GfnGame;
 
+/* A session in the way of a launch (SESSION_LIMIT_PER_DEVICE_EXCEEDED): the
+ * refusal names it and the rig that controls it. */
+typedef struct {
+    char id[160];
+    char host[128]; /* rig control server, "" when not named */
+    char app_id[24];
+    int status;
+} GfnConflict;
+
 typedef struct {
     GfnAuthState auth_state;
     char status[160];
@@ -78,6 +87,11 @@ typedef struct {
     char session_client_id[40];
     char session_device_id[40];
     char session_base_url[256];
+    /* The zone server that controls the session now. NVIDIA moves a queued
+     * session between zones (Frankfurt, London, Stockholm...) and names the
+     * current one in every answer (sessionControlInfo); polls must follow it
+     * or the queue freezes and is dropped after 120 s ("abandoned"). */
+    char session_control_url[256];
     char signaling_url[512];
     char session_token[4096];
     char server_ip[128];
@@ -98,6 +112,29 @@ typedef struct {
      * after a while the session counts as failed instead of retrying on. */
     int64_t poll_fail_since;
     unsigned poll_failures;
+    /* A launch refused because another session holds the slot: the UI asks
+     * whether to resume or end it (gfn_claim_conflict / gfn_end_conflict). */
+    bool conflict_found;
+    GfnConflict conflict;
+    /* Nothing could be closed: NVIDIA releases the slot by itself within
+     * minutes, so the UI retries the launch on a timer. */
+    bool limit_wait;
+    /* Set by the caller for one launch: a refusal waits (limit_wait)
+     * instead of asking about the conflict again. */
+    bool limit_quiet;
+    /* Why the last launch or session failed, short and fixed ("limit",
+     * "abandoned", "entitlement"...), for the launch stats. */
+    char fail_code[16];
+    /* Queue ads NVIDIA asked for (free accounts), and those answered. */
+    bool ads_required;
+    unsigned ads_answered;
+    char ads_pending[4][64];
+    unsigned ads_pending_count;
+    /* Status 4/5: NVIDIA paused the session (the stream dropped); a RESUME
+     * brings it back. While `resuming_until` runs, those states count as
+     * setup instead of an error. */
+    bool session_paused;
+    int64_t resuming_until;
 } GfnClient;
 
 void gfn_client_init(GfnClient *client);
@@ -120,6 +157,13 @@ bool gfn_start_session(GfnClient *client, const GfnGame *game);
 void gfn_session_tick(GfnClient *client);
 bool gfn_stop_session(GfnClient *client);
 bool gfn_session_active(const GfnClient *client);
+/* The conflicting session: take it over (RESUME on its rig, then poll it to
+ * ready), or end it and launch `game` (limit_wait when it cannot be ended). */
+bool gfn_claim_conflict(GfnClient *client);
+bool gfn_end_conflict(GfnClient *client, const GfnGame *game);
+/* After a dropped stream: ask NVIDIA about the session and RESUME it if it
+ * was paused. True while it is still ours (signalling follows once ready). */
+bool gfn_recover_session(GfnClient *client, const GfnGame *game);
 bool gfn_has_session(const GfnClient *client);
 const char *gfn_bearer_token(const GfnClient *client);
 /* Forget tokens in memory and delete the saved login from the SD card. */

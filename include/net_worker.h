@@ -31,7 +31,12 @@ typedef enum {
     /* Opt-in diagnostic report (report.h). */
     NET_JOB_SEND_REPORT,
     /* Anonymous session performance summary (perf_stats.h). */
-    NET_JOB_SEND_STATS
+    NET_JOB_SEND_STATS,
+    /* Another session held the slot: take it over, or end it and launch. */
+    NET_JOB_CLAIM_CONFLICT,
+    NET_JOB_END_CONFLICT,
+    /* The stream dropped: ask NVIDIA about the session, RESUME if paused. */
+    NET_JOB_RECOVER
 } NetJobKind;
 
 typedef struct {

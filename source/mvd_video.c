@@ -83,6 +83,9 @@ static void decoder_main(void *arg);
 static void record_performance(u64 process_ticks, u64 render_ticks, u64 copy_ticks)
 {
     const unsigned process_us = (unsigned)(process_ticks / (SYSCLOCK_ARM11 / 1000000u));
+    /* A decode that spans sleep or the HOME Menu is not decoder time
+     * (beta.18 stats: a 417 s "slowest decode"). */
+    if (process_us > 1000000u) return;
     g_decode_total_us += process_us;
     ++g_decode_total_count;
     if (process_us > g_decode_max_us) g_decode_max_us = process_us;

@@ -24,6 +24,8 @@
 #include "zoom_zones.h"
 #include "gfn_client.h"
 #include "gfn_input.h"
+#include "launch_stats.h"
+#include "net_memory.h"
 #include "http_client.h"
 #include "mvd_video.h"
 #include "net_worker.h"
@@ -290,15 +292,54 @@ static void show_notice(const char *text)
     g_notice_until = osGetTime() + 4000;
 }
 
+/* A job asked for while the worker ran background work (stats upload,
+ * update check): it runs as soon as the worker is free. Beta.19 test: the
+ * player had to press A two or three times after a game ("Still working on
+ * the last request") while the session summary was being sent. */
+static struct {
+    bool set;
+    NetJobKind kind;
+    const char *busy;
+    char text[80];
+    GfnGame game;
+    bool has_game;
+} g_deferred;
+
+static bool background_job(NetJobKind kind)
+{
+    return kind == NET_JOB_SEND_STATS || kind == NET_JOB_UPDATE_CHECK;
+}
+
 /* Hand a blocking call to the network worker; the UI keeps animating. */
 static bool submit_job(NetJobKind kind, const char *busy, const char *text, const GfnGame *game)
 {
     if (!net_worker_submit(kind, text, game)) {
+        const NetJobKind running = net_worker_current_job();
+        if (background_job(running) && !background_job(kind) && !g_deferred.set) {
+            g_deferred.set = true;
+            g_deferred.kind = kind;
+            g_deferred.busy = busy;
+            snprintf(g_deferred.text, sizeof(g_deferred.text), "%s", text ? text : "");
+            g_deferred.has_game = game != NULL;
+            if (game) g_deferred.game = *game;
+            /* The stats upload retries later; an update check is quick. */
+            if (running == NET_JOB_SEND_STATS) net_worker_cancel();
+            g_busy_message = busy;
+            return true;
+        }
         show_notice("Still working on the last request");
         return false;
     }
     g_busy_message = busy;
     return true;
+}
+
+static void run_deferred_job(void)
+{
+    if (!g_deferred.set || net_worker_busy()) return;
+    g_deferred.set = false;
+    if (net_worker_submit(g_deferred.kind, g_deferred.text, g_deferred.has_game ? &g_deferred.game : NULL))
+        g_busy_message = g_deferred.busy;
 }
 
 static void open_modal(AppModal modal, const char *jp, const char *title, const char *text)
@@ -417,6 +458,14 @@ static void prepare_game_session(const GfnGame *game)
     g_app.controls_open = false;
     g_app.stream_frame_base = mvd_video_decoded_frames();
     settings_apply_picture(&g_app.settings);
+    g_app.auto_weak = false;
+    g_app.recover_tried = false;
+    if (!g_app.settings.net_weak && net_memory_choppy_here()) {
+        stream_profile_set_weak(true);
+        g_app.auto_weak = true;
+        diagnostic_log("NET", "the last Standard session on this network was choppy: Weak / hotspot for this one");
+        show_notice("Choppy here last time: using Weak / hotspot mode");
+    }
     diagnostic_log("VIDEO", "launch profile=%s %ux%u@30 initial=%u min=%u max=%u dynamic=%u sharpen=%d",
                    stream_profile_name(), stream_profile_width(), stream_profile_height(),
                    stream_profile_initial_bitrate(), stream_profile_min_bitrate(),
@@ -425,9 +474,17 @@ static void prepare_game_session(const GfnGame *game)
     diagnostic_checkpoint();
 }
 
+/* Launch records only go out with "Share performance stats" on. */
+static const char *launch_share_id(void)
+{
+    return g_app.settings.share_stats ? g_app.settings.install_id : NULL;
+}
+
 static void launch_game(const GfnGame *game)
 {
     prepare_game_session(game);
+    g_app.limit_wait_until = g_app.limit_retry_at = 0;
+    launch_begin(false, stream_profile_weak(), g_app.auto_weak);
     submit_job(NET_JOB_START_SESSION, "Creating your cloud session...", NULL, &g_current_game);
 }
 
@@ -452,6 +509,8 @@ static void leave_session(void)
 {
     diagnostic_log("APP", "user left the session");
     g_perf.user_left = true;
+    launch_end("cancel", launch_share_id());
+    g_app.limit_wait_until = g_app.limit_retry_at = 0;
     close_media();
     /* If the worker is mid-request, cancel it and stop once it is free. */
     if (net_worker_busy()) {
@@ -470,13 +529,18 @@ static bool session_gone(void)
 
 static void retry_session(void)
 {
-    const bool gone = session_gone();
     close_media();
     g_app.stream_frame_base = mvd_video_decoded_frames();
-    if (g_client.session_state == GFN_SESSION_READY && !gone)
-        submit_job(NET_JOB_START_SIGNAL, "Reconnecting to the cloud rig...", NULL, NULL);
-    else if (g_current_game.app_id[0])
+    /* The rig may still be ours even when the signalling says otherwise:
+     * ask CloudMatch, which RESUMEs a paused session (OpenNOW desktop's
+     * recovery). A failed session starts over. */
+    const bool dead = g_client.session_state == GFN_SESSION_ERROR || !g_client.session_id[0];
+    if (!dead)
+        submit_job(NET_JOB_RECOVER, "Reconnecting to the cloud rig...", NULL, &g_current_game);
+    else if (g_current_game.app_id[0]) {
+        launch_begin(false, stream_profile_weak(), g_app.auto_weak);
         submit_job(NET_JOB_RESTART_SESSION, "Restarting your cloud session...", NULL, &g_current_game);
+    }
 }
 
 static void save_settings(void)
@@ -586,7 +650,7 @@ static void change_setting(int direction)
     }
     if (index == SETTING_SHARE_STATS) {
         screens_setting_change(&g_app, index, direction);
-        if (!g_app.settings.share_stats) remove(REPORT_STATS_PENDING_PATH);
+        if (!g_app.settings.share_stats) { remove(REPORT_STATS_PENDING_PATH); remove(LAUNCH_PENDING_PATH); }
         diagnostic_log("REPORT", "share stats %s", g_app.settings.share_stats ? "on" : "off");
         return;
     }
@@ -696,7 +760,7 @@ static void handle_modal(u32 down, AppAction action)
         g_app.settings.share_stats = confirm;
         g_app.settings.share_consent = SHARE_CONSENT_VERSION;
         diagnostic_log("REPORT", "share diagnostics answered %s", confirm ? "yes" : "no");
-        if (!confirm) remove(REPORT_STATS_PENDING_PATH);
+        if (!confirm) { remove(REPORT_STATS_PENDING_PATH); remove(LAUNCH_PENDING_PATH); }
         save_settings();
         show_notice(confirm ? "Thank you! Change it anytime in Settings > System"
                             : "Nothing will be sent. Change it anytime in Settings > System");
@@ -707,6 +771,7 @@ static void handle_modal(u32 down, AppAction action)
             /* The rig is already ours: set the game up and let signalling
              * start as for any ready session. */
             prepare_game_session(&g_client.resume_game);
+            launch_begin(true, stream_profile_weak(), g_app.auto_weak);
             apply_game_options(&(GamePrefs){ .bitrate = -1, .gyro = -1, .layout = -1 });
             const GamePrefs prefs = game_prefs_get(g_current_game.app_id);
             apply_game_options(&prefs);
@@ -714,6 +779,28 @@ static void handle_modal(u32 down, AppAction action)
         } else {
             diagnostic_log("APP", "ending the session left running");
             leave_session();
+        }
+        return;
+    }
+    if (modal == MODAL_CONFLICT) {
+        if (confirm && g_app.conflict_same_game) {
+            diagnostic_log("APP", "resuming the session already running");
+            submit_job(NET_JOB_CLAIM_CONFLICT, "Taking over your running game...", NULL, &g_current_game);
+        } else if (confirm) {
+            diagnostic_log("APP", "ending the other session to start %s", g_current_game.title);
+            submit_job(NET_JOB_END_CONFLICT, "Closing your other session...", NULL, &g_current_game);
+        } else {
+            launch_end("limit", launch_share_id());
+        }
+        return;
+    }
+    if (modal == MODAL_LIMIT_WAIT) {
+        if (confirm) {
+            g_app.limit_retry_at = osGetTime();
+        } else {
+            diagnostic_log("APP", "stopped waiting for NVIDIA to free the slot");
+            g_app.limit_wait_until = g_app.limit_retry_at = 0;
+            launch_end("limit", launch_share_id());
         }
         return;
     }
@@ -1372,6 +1459,7 @@ static void track_session(void)
         finish_history();
         if (g_perf.active) {
             perf_end(g_app.settings.install_id);
+            net_memory_note(g_perf.weak, g_perf.seconds, g_perf.lost, g_perf.repeated);
             /* A clearly choppy session on Standard: point at Weak / hotspot
              * (beta.17 stats: one console lost ~5 frames a minute). */
             const unsigned minutes = g_perf.seconds / 60;
@@ -1423,6 +1511,7 @@ static void track_session(void)
         if (!g_app.stream_started_at) {
             g_app.stream_started_at = now;
             diagnostic_log("APP", "stream started freeTierGuess=%d", g_app.free_tier_guess);
+            launch_end("ok", launch_share_id());
             char region[40];
             regions_last_used(region, sizeof(region));
             perf_begin(g_current_game.title, region, stream_profile_weak(), (unsigned)g_app.settings.bitrate_mode);
@@ -1432,6 +1521,7 @@ static void track_session(void)
         if (!playing_since) playing_since = now;
         /* Ten clean seconds after a reconnect: the next drop starts afresh. */
         if (g_app.reconnect_attempt && now - playing_since >= 10000) g_app.reconnect_attempt = 0;
+        if (g_app.recover_tried && now - playing_since >= 10000) g_app.recover_tried = false;
     } else {
         playing_since = 0;
     }
@@ -1449,6 +1539,22 @@ static void track_session(void)
 
     /* A dropped connection mid-game: the rig is still ours, so reconnect the
      * media instead of sending the player back to the library. */
+    /* Video frozen for 12 s with nothing else wrong (no lid, Wi-Fi up): the
+     * keyframe requests (every 3 s) have not helped, so reconnect. */
+    const bool frozen = g_app.view == VIEW_STREAM && g_transport.state == WEBRTC_CONNECTED &&
+                        g_transport.last_decoded_frame_at && now - g_transport.last_decoded_frame_at > 12000 &&
+                        !g_app.lid_paused && !g_resumed_at && wifi_connected();
+    if (frozen && !net_worker_busy() && g_client.session_state == GFN_SESSION_READY && g_app.reconnect_attempt < 3) {
+        diagnostic_log("APP", "video frozen for %llu ms; reconnecting",
+                       (unsigned long long)(now - g_transport.last_decoded_frame_at));
+        g_transport.last_decoded_frame_at = now;
+        ++g_app.reconnect_attempt;
+        reconnect_at = now;
+        ++g_perf.reconnects;
+        show_notice("Video froze - reconnecting");
+        retry_session();
+        return;
+    }
     const bool dropped = g_transport.state == WEBRTC_FAILED || g_signal.state == NVST_SIGNAL_ERROR;
     static u64 wifi_wait_since, wifi_back_at;
     if (!dropped) {
@@ -1460,6 +1566,16 @@ static void track_session(void)
     /* 404/410 on the signalling upgrade: NVIDIA has closed the session, so
      * reconnecting cannot work. Say so; Retry starts the game again. */
     if (session_gone()) {
+        /* It may only be paused: CloudMatch knows (and RESUMEs it). Once. */
+        if (!g_app.recover_tried) {
+            g_app.recover_tried = true;
+            diagnostic_log("APP", "signalling says the session is gone (HTTP %d); asking CloudMatch", g_signal.upgrade_http);
+            reconnect_at = now;
+            ++g_perf.reconnects;
+            show_notice("Connection lost - checking your session");
+            retry_session();
+            return;
+        }
         diagnostic_log("APP", "session ended on NVIDIA's side (HTTP %d); not reconnecting", g_signal.upgrade_http);
         queue_auto_report("session-ended");
         perf_note_error("session-ended");
@@ -1753,7 +1869,7 @@ static void auto_report_tick(void)
 }
 
 /* A finished session's summary goes out from the menus when idle. */
-static bool g_stats_inflight;
+static bool g_stats_inflight, g_stats_failed;
 
 static void stats_tick(void)
 {
@@ -1763,7 +1879,7 @@ static void stats_tick(void)
         net_worker_busy() || g_app.modal != MODAL_NONE)
         return;
     const u64 now = osGetTime();
-    if (tried_at && now - tried_at < 60000) return;
+    if (tried_at && now - tried_at < (g_stats_failed ? 600000u : 60000u)) return;
     if (!report_stats_pending()) return;
     tried_at = now;
     if (submit_job(NET_JOB_SEND_STATS, NULL, NULL, NULL)) g_stats_inflight = true;
@@ -1780,6 +1896,9 @@ static void watch_session_errors(void)
         diagnostic_log("APP", "session failed: %.120s", g_client.session_state == GFN_SESSION_ERROR ? g_client.status : g_signal.status);
         queue_auto_report(g_app.stream_started_at ? "session-error" : "queue-or-setup-failed");
         perf_note_error("session-error");
+        if (!g_app.stream_started_at)
+            launch_end(g_client.session_state == GFN_SESSION_ERROR && g_client.fail_code[0] ? g_client.fail_code :
+                       "setup", launch_share_id());
     }
     was_error = error;
 }
@@ -1796,6 +1915,79 @@ static void share_prompt_tick(void)
     open_modal(MODAL_SHARE_ASK, "協力", "HELP IMPROVE KASUMI?", "");
 }
 
+/* Minutes NVIDIA may take to free a slot by itself (beta.18: 12 s to
+ * 8 min), and how often to ask meanwhile. */
+#define LIMIT_WAIT_MS (8u * 60u * 1000u)
+#define LIMIT_RETRY_MS 45000u
+
+static void limit_wait_text(void)
+{
+    const u64 now = osGetTime();
+    const unsigned left = g_app.limit_retry_at > now ? (unsigned)((g_app.limit_retry_at - now + 999) / 1000) : 0;
+    snprintf(g_app.modal_text, sizeof(g_app.modal_text),
+             "NVIDIA is still closing your other session. Trying again in %u:%02u (up to 8 min). "
+             "Closing GeForce NOW on other devices helps.", left / 60, left % 60);
+}
+
+/* A launch failed: ask about a session in the way, wait for NVIDIA to free
+ * the slot, or show the error. */
+static void launch_failed(void)
+{
+    const u64 now = osGetTime();
+    if (g_client.conflict_found) {
+        char other[112] = "another game";
+        for (size_t i = 0; i < g_client.game_count; ++i)
+            if (!strcmp(g_client.games[i].app_id, g_client.conflict.app_id))
+                snprintf(other, sizeof(other), "%.40s", g_client.games[i].title);
+        g_app.conflict_same_game = g_client.conflict.app_id[0] &&
+                                   !strcmp(g_client.conflict.app_id, g_current_game.app_id);
+        char text[sizeof(g_app.modal_text)];
+        if (g_app.conflict_same_game)
+            snprintf(text, sizeof(text), "%.90s is already running on your account. Resume it here?",
+                     g_current_game.title);
+        else
+            snprintf(text, sizeof(text), "%s is running on your account, maybe on another device. "
+                     "End it and start %.40s?", other, g_current_game.title);
+        open_modal(MODAL_CONFLICT, "使用中", g_app.conflict_same_game ? "RESUME YOUR GAME?" : "SESSION IN USE", text);
+        return;
+    }
+    if (g_client.limit_wait) {
+        if (!g_app.limit_wait_until) {
+            g_app.limit_wait_until = now + LIMIT_WAIT_MS;
+            diagnostic_log("APP", "waiting for NVIDIA to free the session slot");
+        }
+        if (now < g_app.limit_wait_until) {
+            g_app.limit_retry_at = now + LIMIT_RETRY_MS;
+            open_modal(MODAL_LIMIT_WAIT, "待機中", "ALMOST THERE", "");
+            limit_wait_text();
+            return;
+        }
+        g_app.limit_wait_until = g_app.limit_retry_at = 0;
+        open_modal(MODAL_ERROR, "起動失敗", "LAUNCH FAILED",
+                   "NVIDIA didn't free your session slot in 8 minutes. Close GeForce NOW on your other "
+                   "devices (or wait a little), then try again.");
+        queue_auto_report("launch-failed");
+        launch_end("limit", launch_share_id());
+        return;
+    }
+    open_modal(MODAL_ERROR, "起動失敗", "LAUNCH FAILED", g_client.status);
+    queue_auto_report("launch-failed");
+    launch_end(g_client.fail_code[0] ? g_client.fail_code : "error", launch_share_id());
+}
+
+/* The limit-wait countdown, and its retry. */
+static void limit_wait_tick(void)
+{
+    if (!g_app.limit_retry_at) return;
+    if (g_app.modal == MODAL_LIMIT_WAIT) limit_wait_text();
+    if (osGetTime() < g_app.limit_retry_at || net_worker_busy() || gfn_session_active(&g_client)) return;
+    if (g_app.modal != MODAL_LIMIT_WAIT && g_app.modal != MODAL_NONE) return;
+    g_app.limit_retry_at = 0;
+    g_app.modal = MODAL_NONE;
+    diagnostic_log("APP", "trying the launch again");
+    submit_job(NET_JOB_START_SESSION, "Trying again...", "retry", &g_current_game);
+}
+
 /* React to a worker job that just finished. */
 static void finish_jobs(void)
 {
@@ -1803,12 +1995,18 @@ static void finish_jobs(void)
     const NetJobResult result = net_worker_last_result();
     if (result.serial == seen_serial) return;
     seen_serial = result.serial;
-    if (result.cancelled) {
+    if (result.cancelled && !background_job(result.kind)) {
         show_notice("Cancelled");
-    } else if ((result.kind == NET_JOB_START_SESSION || result.kind == NET_JOB_RESTART_SESSION) &&
-               !result.ok) {
-        open_modal(MODAL_ERROR, "起動失敗", "LAUNCH FAILED", g_client.status);
-        queue_auto_report("launch-failed");
+    } else if ((result.kind == NET_JOB_START_SESSION || result.kind == NET_JOB_RESTART_SESSION ||
+                result.kind == NET_JOB_END_CONFLICT) && !result.ok) {
+        launch_failed();
+    } else if (result.kind == NET_JOB_CLAIM_CONFLICT && !result.ok) {
+        open_modal(MODAL_ERROR, "起動失敗", "COULDN'T RESUME", g_client.status);
+        launch_end(g_client.fail_code[0] ? g_client.fail_code : "claim", launch_share_id());
+    } else if (result.kind == NET_JOB_RECOVER && !result.ok && g_client.session_state == GFN_SESSION_ERROR) {
+        /* watch_session_errors reports it (the session is in error now). */
+        diagnostic_log("APP", "session ended on NVIDIA's side (%s); not reconnecting", g_client.fail_code);
+        g_app.reconnect_attempt = 4;
     }
     if (result.kind == NET_JOB_LOAD_LIBRARY || result.kind == NET_JOB_SEARCH)
         g_app.selected = g_app.list_top = 0;
@@ -1819,7 +2017,10 @@ static void finish_jobs(void)
         g_current_game = g_client.resume_game;
         open_modal(MODAL_RESUME, "再開", "RESUME YOUR GAME?", text);
     }
-    if (result.kind == NET_JOB_SEND_STATS) g_stats_inflight = false;
+    if (result.kind == NET_JOB_SEND_STATS) {
+        g_stats_inflight = false;
+        g_stats_failed = !result.ok;
+    }
     if (result.kind == NET_JOB_SEND_REPORT && g_auto_inflight) {
         g_auto_inflight = false;
         if (result.ok) {
@@ -1841,12 +2042,23 @@ static void finish_jobs(void)
     if (result.kind == NET_JOB_UPDATE_CHECK) {
         const UpdateInfo info = updater_info();
         if (info.state == UPDATE_AVAILABLE && !updater_dismissed() && !g_app.update_open) {
-            char text[96];
-            snprintf(text, sizeof(text), "Kasumi %s is available - Settings > Updates", info.latest);
-            show_notice(text);
+            /* Show the update itself (notes, Install / Later) when nothing
+             * else is on screen; a toast was easy to miss (beta.18). */
+            const bool quiet = (g_app.view == VIEW_LIBRARY || g_app.view == VIEW_WELCOME) &&
+                               g_app.modal == MODAL_NONE && !g_app.whats_new_open && g_app.guide_page < 0 &&
+                               !gfn_session_active(&g_client) && !g_app.settings_open;
+            if (quiet) {
+                diagnostic_log("UPDATE", "showing %s", info.latest);
+                open_updates();
+            } else {
+                char text[96];
+                snprintf(text, sizeof(text), "Kasumi %s is available - Settings > Updates", info.latest);
+                show_notice(text);
+            }
         }
     }
     if (g_leave_pending && !net_worker_busy()) leave_session();
+    run_deferred_job();
 }
 
 static void log_session(void)
@@ -1985,9 +2197,9 @@ int main(int argc, char **argv)
     while (aptMainLoop() && !g_quit) {
         {
             const u64 loop_now = osGetTime();
-            const unsigned loop_ms = (unsigned)(loop_now - loop_started);
+            const unsigned loop_ms = loop_now > loop_started ? (unsigned)(loop_now - loop_started) : 0;
             loop_started = loop_now;
-            if (g_app.view == VIEW_STREAM) {
+            if (g_app.view == VIEW_STREAM && loop_ms < 5000) {
                 if (loop_ms > g_loop_max_ms) g_loop_max_ms = loop_ms;
                 if (loop_ms > 25) {
                     ++g_loop_slow;
@@ -2078,6 +2290,8 @@ int main(int argc, char **argv)
         g_app.toast = g_notice[0] && osGetTime() < g_notice_until ? g_notice : NULL;
         track_session();
         watch_session_errors();
+        launch_track(&g_client);
+        limit_wait_tick();
         g_app.video_stalled = g_app.view == VIEW_STREAM && g_transport.last_decoded_frame_at &&
                               osGetTime() - g_transport.last_decoded_frame_at > 1500;
         /* While video owns the top screen, redraw the lower screen only when

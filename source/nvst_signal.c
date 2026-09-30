@@ -155,6 +155,10 @@ static bool incoming(void *context, unsigned opcode, const uint8_t *data, size_t
     if (opcode == 10) return true;
     if (opcode == 8) {
         s->close_code = size >= 2 ? (uint16_t)((data[0] << 8) | data[1]) : 1005;
+        /* NVIDIA's reason text, if any: why a rig closed the session. */
+        if (size > 2)
+            diagnostic_log("NVST", "close code=%u reason=%.*s", s->close_code,
+                           (int)(size - 2 > 80 ? 80 : size - 2), (const char *)data + 2);
         /* Echo the close before relinquishing the transport. */
         send_frame(s, 8, data, size);
         s->state = NVST_SIGNAL_CLOSED;

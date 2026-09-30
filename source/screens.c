@@ -1081,8 +1081,13 @@ static void draw_modal_top(const App *app, float p)
     static const char *const error[] = { "A", "Retry", "B", "Back", NULL };
     static const char *const send[] = { "A", "Send", "B", "Cancel", NULL };
     static const char *const done[] = { "A", "OK", NULL };
+    static const char *const resume_other[] = { "A", "Resume", "B", "Back", NULL };
+    static const char *const end_other[] = { "A", "End it", "B", "Back", NULL };
+    static const char *const wait[] = { "A", "Try now", "B", "Stop", NULL };
     ui_hint_row(200, 162, app->modal == MODAL_ERROR ? error : app->modal == MODAL_SEND_REPORT ? send :
-                          app->modal == MODAL_REPORT_SENT ? done : confirm);
+                          app->modal == MODAL_REPORT_SENT ? done :
+                          app->modal == MODAL_CONFLICT ? (app->conflict_same_game ? resume_other : end_other) :
+                          app->modal == MODAL_LIMIT_WAIT ? wait : confirm);
     ui_offset(0.0f, 0.0f);
 }
 
@@ -2199,6 +2204,15 @@ static void draw_modal_bottom(const App *app, float p)
         return;
     }
     const bool send = app->modal == MODAL_SEND_REPORT, share = app->modal == MODAL_SHARE_ASK;
+    if (app->modal == MODAL_CONFLICT || app->modal == MODAL_LIMIT_WAIT) {
+        const bool wait = app->modal == MODAL_LIMIT_WAIT, same = app->conflict_same_game;
+        ui_button(MODAL_LEFT, wait ? "TRY NOW" : same ? "RESUME" : "END IT", wait ? "再試行" : same ? "再開" : "終了",
+                  wait || same ? UI_BUTTON_PRIMARY : UI_BUTTON_DANGER, pressed(app, MODAL_LEFT));
+        ui_button(MODAL_RIGHT, wait ? "STOP" : "BACK", wait ? "中止" : "戻る", UI_BUTTON_NORMAL,
+                  pressed(app, MODAL_RIGHT));
+        ui_offset(0.0f, 0.0f);
+        return;
+    }
     ui_button(MODAL_LEFT, resume ? "RESUME" : error ? "RETRY" : send ? "SEND" : share ? "SHARE" : "YES",
               resume ? "再開" : error ? "再試行" : send ? "送信" : share ? "協力" : "はい",
               app->modal == MODAL_EXIT || app->modal == MODAL_SIGN_OUT ? UI_BUTTON_DANGER

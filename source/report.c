@@ -15,6 +15,7 @@
 #include "app_paths.h"
 #include "diagnostic.h"
 #include "http_client.h"
+#include "launch_stats.h"
 
 /* Each log is capped (its end is kept): 6000 lines is well under this. */
 #define LOG_CAP (768 * 1024)
@@ -37,11 +38,40 @@ bool report_available(void) { return strstr(REPORT_BASE, "CHANGE-ME") == NULL; }
 bool report_stats_pending(void)
 {
     struct stat st;
-    return stat(REPORT_STATS_PENDING_PATH, &st) == 0 && st.st_size > 0;
+    return (stat(REPORT_STATS_PENDING_PATH, &st) == 0 && st.st_size > 0) ||
+           (stat(LAUNCH_PENDING_PATH, &st) == 0 && st.st_size > 2);
+}
+
+/* Launch records (launch_stats.h), as {"app":"Kasumi","launches":[...]}. */
+static bool send_launches(void)
+{
+    size_t length = 0;
+    char *list = read_file(LAUNCH_PENDING_PATH, 12 * 1024, &length);
+    if (!list) return false;
+    char *body = malloc(length + 40);
+    if (!body) {
+        free(list);
+        return false;
+    }
+    snprintf(body, length + 40, "{\"app\":\"Kasumi\",\"launches\":%s}", list);
+    free(list);
+    static const char *const headers[] = { "Content-Type: application/json" };
+    HttpResponse response;
+    http_next_request(5, NULL, NULL);
+    const bool sent = http_request("POST", LAUNCHES_URL, "Kasumi-3DS", headers, 1, body, 4096, &response);
+    const long status = response.status;
+    http_response_free(&response);
+    free(body);
+    /* A service without /launches yet answers 404: keep them (capped). */
+    if (sent && (status == 200 || status == 400 || status == 413)) remove(LAUNCH_PENDING_PATH);
+    diagnostic_log("REPORT", "launch records sent=%d http=%ld", sent, sent ? status : 0);
+    return sent && status == 200;
 }
 
 bool report_send_stats(void)
 {
+    struct stat st;
+    if (stat(LAUNCH_PENDING_PATH, &st) == 0 && st.st_size > 2) send_launches();
     size_t length = 0;
     char *summary = read_file(REPORT_STATS_PENDING_PATH, 4096, &length);
     if (!summary) return false;
