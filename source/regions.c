@@ -9,6 +9,7 @@
 #include "app_paths.h"
 #include "diagnostic.h"
 #include "http_client.h"
+#include "provider.h"
 
 #define REGIONS_PATH APP_DATA_DIR "/regions.json"
 /* Servers don't move; a network's measurement stays good for a week. */
@@ -31,6 +32,31 @@ static char g_choice[40];
 static char g_local[40];
 static char g_last_used[40];
 static bool g_avoid_once;
+/* The provider the cached list belongs to: a partner account (provider.h)
+ * has its own regions, so another provider's list is dropped. */
+static char g_provider[12];
+
+/* Drop a list made for another provider. Call with the lock held. */
+static void check_provider_locked(void)
+{
+    GfnProvider active;
+    provider_active(&active);
+    if (!strcmp(g_provider, active.code)) return;
+    if (g_count || g_provider[0])
+        diagnostic_log("REGION", "provider now %s (list was %s): regions cleared", active.code,
+                       g_provider[0] ? g_provider : "-");
+    g_count = 0;
+    g_local[0] = '\0';
+    g_measured_at = 0;
+    g_measured_ssid[0] = '\0';
+    snprintf(g_provider, sizeof(g_provider), "%s", active.code);
+}
+
+/* The label for the provider's own entry point. */
+static const char *default_label(void)
+{
+    return provider_is_nvidia() ? "NVIDIA default" : "provider default";
+}
 
 void regions_avoid_once(void)
 {
@@ -69,9 +95,9 @@ static void save(void)
     for (unsigned i = 0; i < g_count; ++i)
         json_array_append_new(list, json_pack("{s:s,s:s,s:i}", "name", g_regions[i].name,
                                               "url", g_regions[i].url, "ms", g_regions[i].ms));
-    json_t *root = json_pack("{s:i,s:o,s:s,s:s,s:I}", "version", REGIONS_VERSION, "regions", list,
+    json_t *root = json_pack("{s:i,s:o,s:s,s:s,s:I,s:s}", "version", REGIONS_VERSION, "regions", list,
                              "local", g_local, "ssid", g_measured_ssid,
-                             "measured_at", (json_int_t)g_measured_at);
+                             "measured_at", (json_int_t)g_measured_at, "provider", g_provider);
     LightLock_Unlock(&g_lock);
     if (root) json_dump_file(root, REGIONS_PATH, JSON_INDENT(1));
     json_decref(root);
@@ -106,6 +132,9 @@ void regions_load(void)
     snprintf(g_measured_ssid, sizeof(g_measured_ssid), "%s", ssid ? ssid : "");
     json_t *at = json_is_object(root) ? json_object_get(root, "measured_at") : NULL;
     g_measured_at = current && json_is_integer(at) ? (int64_t)json_integer_value(at) : 0;
+    /* Lists saved before providers existed are NVIDIA's. */
+    const char *provider = json_is_object(root) ? json_string_value(json_object_get(root, "provider")) : NULL;
+    snprintf(g_provider, sizeof(g_provider), "%s", provider && provider[0] ? provider : PROVIDER_NVIDIA);
     json_decref(root);
 }
 
@@ -114,9 +143,11 @@ void regions_load(void)
 bool regions_update(void)
 {
     static const char *const headers[] = { "Accept: application/json" };
+    char base[96], url[128];
+    provider_base_url(base, sizeof(base));
+    snprintf(url, sizeof(url), "%s/v2/serverInfo", base);
     HttpResponse response;
-    if (!http_request("GET", REGION_NVIDIA_URL "/v2/serverInfo", "Kasumi-3DS", headers, 1, NULL,
-                      256 * 1024, &response)) {
+    if (!http_request("GET", url, "Kasumi-3DS", headers, 1, NULL, 256 * 1024, &response)) {
         diagnostic_log("REGION", "list failed: %s", response.error);
         return false;
     }
@@ -147,6 +178,7 @@ bool regions_update(void)
         return false;
     }
     LightLock_Lock(&g_lock);
+    check_provider_locked();
     /* Keep earlier measurements for regions that are still listed. */
     for (unsigned i = 0; i < count; ++i)
         for (unsigned j = 0; j < g_count; ++j)
@@ -252,6 +284,7 @@ void regions_measure(void)
 unsigned regions_count(void)
 {
     LightLock_Lock(&g_lock);
+    check_provider_locked();
     const unsigned count = g_count;
     LightLock_Unlock(&g_lock);
     return count;
@@ -304,10 +337,10 @@ void regions_resolve(char *url, size_t size)
     LightLock_Lock(&g_lock);
     snprintf(choice, sizeof(choice), "%s", g_choice);
     LightLock_Unlock(&g_lock);
-    snprintf(url, size, "%s", REGION_NVIDIA_URL);
+    provider_base_url(url, size);
     if (!strcmp(choice, REGION_CHOICE_NVIDIA)) {
-        diagnostic_log("REGION", "server=NVIDIA default");
-        set_last_used("NVIDIA default");
+        diagnostic_log("REGION", "server=%s", default_label());
+        set_last_used(default_label());
         return;
     }
     if (choice[0]) {
@@ -319,8 +352,8 @@ void regions_resolve(char *url, size_t size)
             found = true;
         }
         LightLock_Unlock(&g_lock);
-        diagnostic_log("REGION", "server=%s%s", choice, found ? "" : " (not listed; NVIDIA default)");
-        set_last_used(found ? choice : "NVIDIA default");
+        diagnostic_log("REGION", "server=%s%s", choice, found ? "" : " (not listed; default)");
+        set_last_used(found ? choice : default_label());
         return;
     }
     LightLock_Lock(&g_lock);
@@ -328,8 +361,8 @@ void regions_resolve(char *url, size_t size)
     g_avoid_once = false;
     LightLock_Unlock(&g_lock);
     if (avoid) {
-        diagnostic_log("REGION", "server=auto: last session there failed; NVIDIA default this time");
-        set_last_used("NVIDIA default");
+        diagnostic_log("REGION", "server=auto: last session there failed; %s this time", default_label());
+        set_last_used(default_label());
         return;
     }
     /* Auto: the region with the lowest ping from this network. Measuring
@@ -358,7 +391,7 @@ void regions_resolve(char *url, size_t size)
                        local[0] ? local : "unknown");
         set_last_used(region.name);
     } else {
-        diagnostic_log("REGION", "server=auto: no measurement; NVIDIA default");
-        set_last_used("NVIDIA default");
+        diagnostic_log("REGION", "server=auto: no measurement; %s", default_label());
+        set_last_used(default_label());
     }
 }

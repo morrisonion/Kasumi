@@ -7,6 +7,7 @@
 
 #include "app_paths.h"
 #include "diagnostic.h"
+#include "provider.h"
 #include "regions.h"
 
 /* Oldest records drop first when the service can't be reached for a while. */
@@ -61,8 +62,11 @@ void launch_end(const char *outcome, const char *install_id)
     if (!install_id) return;
     char region[40];
     regions_last_used(region, sizeof(region));
-    json_t *record = json_pack("{s:s,s:s,s:s,s:s,s:s,s:i,s:i,s:i,s:i,s:i,s:i,s:i,s:i,s:i}",
+    GfnProvider provider;
+    provider_active(&provider);
+    json_t *record = json_pack("{s:s,s:s,s:s,s:s,s:s,s:s,s:i,s:i,s:i,s:i,s:i,s:i,s:i,s:i,s:i}",
                                "v", APP_VERSION, "b", APP_BUILD, "i", install_id, "r", region, "o", outcome,
+                               "pv", provider.code,
                                "q", (int)queue_s, "qp", g_launch.first_place, "s", (int)ready_s,
                                "ff", (int)first_frame_ms, "ad", g_launch.ads ? 1 : 0,
                                "c", g_launch.conflict ? 1 : 0, "rs", g_launch.resumed ? 1 : 0,

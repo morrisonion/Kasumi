@@ -212,6 +212,7 @@ static const SettingEntry SETTING_ENTRIES[] = {
     { SETTING_AUTO_UPDATE, NULL, NULL },
     { SETTING_UPDATE_CHANNEL, NULL, NULL },
     { -1, "アカウント", "ACCOUNT" },
+    { SETTING_PROVIDER, NULL, NULL },
     { SETTING_ACCOUNT, NULL, NULL },
 };
 #define SETTING_ENTRY_COUNT (int)(sizeof(SETTING_ENTRIES) / sizeof(SETTING_ENTRIES[0]))
@@ -240,7 +241,7 @@ static const char *const SETTING_LABELS[SETTING_COUNT] = {
     [SETTING_REPORT] = "Send diagnostic report", [SETTING_SHARE] = "Share problem reports",
     [SETTING_SHARE_STATS] = "Share performance stats",
     [SETTING_UPDATES] = "Software update", [SETTING_AUTO_UPDATE] = "Check automatically",
-    [SETTING_UPDATE_CHANNEL] = "Update channel",
+    [SETTING_UPDATE_CHANNEL] = "Update channel", [SETTING_PROVIDER] = "GeForce NOW provider",
 };
 static const char *const SETTING_JP[SETTING_COUNT] = {
     [SETTING_LAYOUT] = "ボタン配置", [SETTING_TRIGGERS] = "トリガー",
@@ -255,7 +256,7 @@ static const char *const SETTING_JP[SETTING_COUNT] = {
     [SETTING_NETWORK] = "回線", [SETTING_SERVER] = "サーバー",
     [SETTING_REPORT] = "報告", [SETTING_SHARE] = "協力", [SETTING_SHARE_STATS] = "統計",
     [SETTING_UPDATES] = "更新", [SETTING_AUTO_UPDATE] = "自動確認",
-    [SETTING_UPDATE_CHANNEL] = "チャンネル",
+    [SETTING_UPDATE_CHANNEL] = "チャンネル", [SETTING_PROVIDER] = "提供元",
 };
 
 static const char *connection_advice(const GfnClient *c);
@@ -303,6 +304,23 @@ static void set_server_index(AppSettings *s, unsigned index)
     else if (regions_get(index - 2, &region)) snprintf(s->server, sizeof(s->server), "%s", region.name);
 }
 
+/* Provider setting: 0 = Auto, then NVIDIA's list in order. */
+static unsigned provider_index(const AppSettings *s)
+{
+    if (!s->provider[0]) return 0;
+    GfnProvider p;
+    for (unsigned i = 0; providers_get(i, &p); ++i)
+        if (!strcmp(p.code, s->provider)) return i + 1;
+    return 0;
+}
+
+static void set_provider_index(AppSettings *s, unsigned index)
+{
+    GfnProvider p;
+    if (index == 0 || !providers_get(index - 1, &p)) s->provider[0] = '\0';
+    else snprintf(s->provider, sizeof(s->provider), "%s", p.code);
+}
+
 /* Current option and option count, for the dot indicator. */
 static unsigned setting_option(const App *app, int setting, unsigned *count)
 {
@@ -327,6 +345,7 @@ static unsigned setting_option(const App *app, int setting, unsigned *count)
     case SETTING_SHARE: *count = 2; return s->share_reports == SHARE_YES ? 0 : 1;
     case SETTING_SHARE_STATS: *count = 2; return s->share_stats ? 0 : 1;
     case SETTING_SERVER: *count = 2 + regions_count(); return server_index(s);
+    case SETTING_PROVIDER: *count = 1 + providers_count(); return provider_index(s);
     case SETTING_AUTO_UPDATE: *count = 2; return s->auto_update ? 0 : 1;
     case SETTING_UPDATE_CHANNEL: *count = 2; return s->update_beta ? 1 : 0;
     default: *count = 0; return 0;
@@ -405,6 +424,19 @@ static const char *setting_value(const App *app, int setting)
     case SETTING_AUTO_UPDATE: return s->auto_update ? "On" : "Off";
     case SETTING_UPDATE_CHANNEL: return s->update_beta ? "Beta" : "Stable";
     case SETTING_ACCOUNT: return gfn_has_session(app->client) ? "Sign out" : "Signed out";
+    case SETTING_PROVIDER: {
+        static char text[56];
+        GfnProvider p;
+        if (!s->provider[0]) {
+            providers_recommended(&p);
+            snprintf(text, sizeof(text), "Auto · %s", p.name);
+        } else if (providers_find(s->provider, &p)) {
+            snprintf(text, sizeof(text), "%s", p.name);
+        } else {
+            snprintf(text, sizeof(text), "%s", s->provider);
+        }
+        return text;
+    }
     }
     return "";
 }
@@ -499,6 +531,22 @@ static const char *setting_description(const App *app, int setting)
             : "Closing the lid turns the screens and sound off but stays connected: open it and you are straight back in.";
     case SETTING_ACCOUNT:
         return "Remove the saved NVIDIA login from this console's SD card.";
+    case SETTING_PROVIDER: {
+        /* Signed in through another provider than the one chosen: say how
+         * to switch (the login belongs to its provider). */
+        static char text[200];
+        GfnProvider active, chosen;
+        provider_active(&active);
+        if (!s->provider[0]) providers_recommended(&chosen);
+        else if (!providers_find(s->provider, &chosen)) provider_nvidia(&chosen);
+        if (gfn_has_session(app->client) && strcmp(active.code, chosen.code)) {
+            snprintf(text, sizeof(text), "Signed in with %s. To use %s, sign out below and sign in again.",
+                     active.name, chosen.name);
+            return text;
+        }
+        return "Where your GeForce NOW account comes from. In some countries (Japan, Korea, Taiwan, "
+               "the Middle East...) it's run by a local partner: pick it here, then sign in. Beta.";
+    }
     }
     return "";
 }
@@ -535,6 +583,11 @@ void screens_setting_change(App *app, int setting, int direction)
     case SETTING_SERVER: {
         const unsigned count = 2 + regions_count();
         set_server_index(s, (server_index(s) + (step < 0 ? count - 1 : 1)) % count);
+        break;
+    }
+    case SETTING_PROVIDER: {
+        const unsigned count = 1 + providers_count();
+        set_provider_index(s, (provider_index(s) + (step < 0 ? count - 1 : 1)) % count);
         break;
     }
     case SETTING_AUTO_UPDATE: s->auto_update = !s->auto_update; break;

@@ -23,7 +23,6 @@ static void active_clear(void);
 #define ACTIVE_SESSION_PATH APP_DATA_DIR "/active-session.json"
 
 static const char *DEVICE_CLIENT_ID = "q61ddeJrVt7O90Nl-P-N7I36yctih4Ml6FyXLrb6j-U";
-static const char *NVIDIA_IDP = "PDiAhv2kJTFeQ7WOPqiQ2tRZ7lGhR2X11dXvM4TZSxg";
 static const char *DEVICE_UA = "Mozilla/5.0 (X11; Linux x86_64; Steam Deck) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 static const char *GFN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 NVIDIACEFClient/HEAD/debb5919f6 GFN-PC/2.0.87.131";
 /* CloudMatch sessions belong to the client id that made them. Beta.18 made a
@@ -79,6 +78,10 @@ static bool save_session(const GfnClient *client)
     json_object_set_new(root, "client_token", json_string(client->client_token));
     json_object_set_new(root, "client_token_expires_at", json_integer(client->client_token_expires_at));
     json_object_set_new(root, "user_id", json_string(client->user_id));
+    GfnProvider provider;
+    provider_active(&provider);
+    json_object_set_new(root, "provider", json_pack("{s:s,s:s,s:s,s:s}", "code", provider.code,
+                                                    "name", provider.name, "idp", provider.idp, "url", provider.url));
     const int result = json_dump_file(root, SESSION_TMP, JSON_COMPACT);
     json_decref(root);
     if (result != 0) return false;
@@ -100,6 +103,17 @@ static bool load_session(GfnClient *client)
     json_t *client_expires = json_object_get(root, "client_token_expires_at");
     client->client_token_expires_at = json_is_integer(client_expires) ? json_integer_value(client_expires) : 0;
     copy_json_string(client->user_id, sizeof(client->user_id), root, "user_id");
+    /* Logins saved before providers existed are NVIDIA's. */
+    GfnProvider provider;
+    provider_nvidia(&provider);
+    json_t *saved = json_object_get(root, "provider");
+    if (json_is_object(saved)) {
+        copy_json_string(provider.code, sizeof(provider.code), saved, "code");
+        copy_json_string(provider.name, sizeof(provider.name), saved, "name");
+        copy_json_string(provider.idp, sizeof(provider.idp), saved, "idp");
+        copy_json_string(provider.url, sizeof(provider.url), saved, "url");
+    }
+    provider_set_active(&provider);
     json_decref(root);
     return client->access_token[0] != '\0';
 }
@@ -235,6 +249,10 @@ static bool request_tokens(GfnClient *client, const char *form, bool polling)
         json_decref(root);
         http_response_free(&response);
         client->auth_state = GFN_AUTH_LOGGED_IN;
+        if (polling) {
+            provider_set_active(&client->login_provider);
+            diagnostic_log("AUTH", "signed in through provider %s", client->login_provider.code);
+        }
         hydrate_session_identity(client);
         const bool saved = save_session(client);
         snprintf(client->status, sizeof(client->status), "Signed in; session %s", saved ? "saved to SD" : "save failed");
@@ -327,6 +345,9 @@ void gfn_client_init(GfnClient *client)
     memset(client, 0, sizeof(*client));
     srand((unsigned)(svcGetSystemTick() ^ osGetTime()));
     if (load_session(client)) {
+        GfnProvider provider;
+        provider_active(&provider);
+        diagnostic_log("AUTH", "saved login, provider %s", provider.code);
         client->auth_state = GFN_AUTH_LOGGED_IN;
         snprintf(client->status, sizeof(client->status), "Saved NVIDIA session loaded");
     } else {
@@ -335,15 +356,30 @@ void gfn_client_init(GfnClient *client)
     }
 }
 
-bool gfn_begin_login(GfnClient *client)
+bool gfn_begin_login(GfnClient *client, const char *provider_choice)
 {
     client->catalog_vpc[0] = '\0';
+    /* Refresh the provider list (quick, no login needed); the cached one
+     * serves when it can't be reached. */
+    providers_fetch();
+    GfnProvider provider;
+    if (provider_choice && provider_choice[0]) {
+        if (!providers_find(provider_choice, &provider)) {
+            diagnostic_log("AUTH", "provider %s not listed; using NVIDIA", provider_choice);
+            provider_nvidia(&provider);
+        }
+    } else {
+        providers_recommended(&provider);
+    }
+    client->login_provider = provider;
+    diagnostic_log("AUTH", "sign-in through provider %s (%s)", provider.code,
+                   provider_choice && provider_choice[0] ? "chosen" : "auto");
     char device_id[40];
     get_device_id(device_id);
     char form[768];
     snprintf(form, sizeof(form),
              "client_id=%s&scope=openid%%20consent%%20email%%20tk_client%%20age&device_id=%s&display_name=Kasumi-3DS&idp_id=%s",
-             DEVICE_CLIENT_ID, device_id, NVIDIA_IDP);
+             DEVICE_CLIENT_ID, device_id, provider.idp);
     char device_header[80];
     snprintf(device_header, sizeof(device_header), "x-device-id: %s", device_id);
     const char *headers[] = {
@@ -388,7 +424,11 @@ bool gfn_begin_login(GfnClient *client)
         return false;
     }
     client->auth_state = GFN_AUTH_WAITING;
-    snprintf(client->status, sizeof(client->status), "Open URL on phone/PC and enter code");
+    if (strcmp(provider.code, PROVIDER_NVIDIA))
+        snprintf(client->status, sizeof(client->status), "Signing in through %s: open URL on phone/PC and enter code",
+                 provider.name);
+    else
+        snprintf(client->status, sizeof(client->status), "Open URL on phone/PC and enter code");
     return true;
 }
 
@@ -448,10 +488,15 @@ static bool fetch_catalog(GfnClient *client, const char *search_query, bool owne
         "nv-client-streamer: WEBRTC", "nv-device-os: WINDOWS", "nv-device-type: DESKTOP"
     };
     char vpc_id[64] = "GFN-PC";
+    /* The library's VPC comes from the account's own provider (a partner's
+     * serverInfo names its own), as in OpenNOW desktop. */
+    char base[96], info_url[128];
+    provider_base_url(base, sizeof(base));
+    snprintf(info_url, sizeof(info_url), "%s/v2/serverInfo", base);
     HttpResponse server_info;
     if (client->catalog_vpc[0] && (int64_t)time(NULL) < client->catalog_vpc_expires_at) {
         snprintf(vpc_id, sizeof(vpc_id), "%s", client->catalog_vpc);
-    } else if (http_request("GET", "https://prod.cloudmatchbeta.nvidiagrid.net/v2/serverInfo", GFN_UA,
+    } else if (http_request("GET", info_url, GFN_UA,
                      lcars_headers, ARRAY_SIZE(lcars_headers), NULL, 256 * 1024, &server_info)) {
         if (server_info.status == 401 || server_info.status == 403) {
             snprintf(client->status, sizeof(client->status), "GFN rejected saved login (HTTP %ld)", server_info.status);
@@ -704,7 +749,9 @@ bool gfn_library_load(GfnClient *client)
  * NVIDIA's CDN after a warm-up request on the same connection. */
 bool gfn_connection_test(GfnClient *client)
 {
-    static const char *const info_url = "https://prod.cloudmatchbeta.nvidiagrid.net/v2/serverInfo";
+    char base[96], info_url[128];
+    provider_base_url(base, sizeof(base));
+    snprintf(info_url, sizeof(info_url), "%s/v2/serverInfo", base);
     static const char *const cdn_url =
         "https://static.nvidiagrid.net/supported-public-game-list/locales/gfnpc-en-US.json";
     static const char *const warm_headers[] = { "Accept: */*", "Range: bytes=0-1023" };
@@ -1226,8 +1273,8 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
         } else if (strstr(reason, "ENTITLEMENT")) {
             code = "entitlement";
             snprintf(client->status, sizeof(client->status),
-                     "NVIDIA says this account can't stream here. Your country may be served by a local "
-                     "GeForce NOW partner, or the game isn't available to it (code %d).", status_code);
+                     "This account can't stream here. If a local partner runs GeForce NOW in your country, "
+                     "pick it in Settings > Account and sign in again (code %d).", status_code);
         } else if (strstr(reason, "NO_CAPACITY") || strstr(reason, "CAPACITY")) {
             code = "capacity";
             snprintf(client->status, sizeof(client->status),
@@ -1444,7 +1491,10 @@ static CloudBases cloud_bases(const GfnClient *client, const char *rig)
     if (rig && rig[0]) b.bases[b.base_count++] = rig;
     if (client->session_base_url[0] && (!rig || strcmp(rig, client->session_base_url)))
         b.bases[b.base_count++] = client->session_base_url;
-    if (strcmp(client->session_base_url, REGION_NVIDIA_URL)) b.bases[b.base_count++] = REGION_NVIDIA_URL;
+    /* The provider's own entry point (worker thread only). */
+    static char entry[96];
+    provider_base_url(entry, sizeof(entry));
+    if (strcmp(client->session_base_url, entry)) b.bases[b.base_count++] = entry;
     return b;
 }
 
@@ -2085,7 +2135,9 @@ void gfn_session_tick(GfnClient *client)
             client->session_state = GFN_SESSION_ERROR;
             /* An automatically chosen region may be the problem: the retry
              * goes through NVIDIA's own pick. */
-            if (strcmp(client->session_base_url, REGION_NVIDIA_URL)) regions_avoid_once();
+            char entry[96];
+            provider_base_url(entry, sizeof(entry));
+            if (strcmp(client->session_base_url, entry)) regions_avoid_once();
         } else {
             unsigned backoff = 2u << (client->poll_failures - 1 < 3 ? client->poll_failures - 1 : 3);
             if (backoff > 15) backoff = 15;
@@ -2256,6 +2308,8 @@ bool gfn_session_active(const GfnClient *client)
 void gfn_sign_out(GfnClient *client)
 {
     remove(SESSION_PATH);
+    provider_set_active(NULL);
+    client->catalog_vpc[0] = '\0';
     remove(LIBRARY_CACHE_PATH);
     client->library_saved_at = 0;
     memset(client->access_token, 0, sizeof(client->access_token));

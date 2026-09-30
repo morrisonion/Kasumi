@@ -37,6 +37,7 @@ void settings_defaults(AppSettings *settings)
     settings->share_consent = 0;
     settings->install_id[0] = '\0';
     settings->server[0] = '\0';
+    settings->provider[0] = '\0';
 }
 
 unsigned settings_deadzone_percent(DeadzoneLevel level)
@@ -102,6 +103,9 @@ bool settings_load(AppSettings *settings)
     if (json_is_string(install)) snprintf(settings->install_id, sizeof(settings->install_id), "%s", json_string_value(install));
     json_t *server = json_object_get(root, "server");
     if (json_is_string(server)) snprintf(settings->server, sizeof(settings->server), "%s", json_string_value(server));
+    json_t *provider = json_object_get(root, "provider");
+    if (json_is_string(provider))
+        snprintf(settings->provider, sizeof(settings->provider), "%s", json_string_value(provider));
     json_decref(root);
     return true;
 }
@@ -110,7 +114,7 @@ bool settings_save(const AppSettings *settings)
 {
     mkdir("sdmc:/3ds", 0777);
     mkdir(APP_DATA_DIR, 0777);
-    json_t *root = json_pack("{s:i,s:i,s:b,s:b,s:b,s:b,s:b,s:i,s:b,s:i,s:i,s:i,s:i,s:b,s:i,s:b,s:b,s:b,s:b,s:s,s:i,s:s,s:b,s:i}",
+    json_t *root = json_pack("{s:i,s:i,s:b,s:b,s:b,s:b,s:b,s:i,s:b,s:i,s:i,s:i,s:i,s:b,s:i,s:b,s:b,s:b,s:b,s:s,s:i,s:s,s:b,s:i,s:s}",
                              "button_layout", (int)settings->button_layout,
                              "deadzone", (int)settings->deadzone,
                              "swap_shoulders", settings->swap_shoulders,
@@ -134,7 +138,8 @@ bool settings_save(const AppSettings *settings)
                              "share_reports", (int)settings->share_reports,
                              "install_id", settings->install_id,
                              "share_stats", settings->share_stats,
-                             "share_consent", (int)settings->share_consent);
+                             "share_consent", (int)settings->share_consent,
+                             "provider", settings->provider);
     if (!root) return false;
     const bool ok = json_dump_file(root, SETTINGS_PATH, JSON_INDENT(2)) == 0;
     json_decref(root);

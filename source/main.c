@@ -418,7 +418,7 @@ static void keep_selection_visible(void)
 
 static void begin_login(void)
 {
-    submit_job(NET_JOB_BEGIN_LOGIN, "Requesting a sign-in code from NVIDIA...", NULL, NULL);
+    submit_job(NET_JOB_BEGIN_LOGIN, "Requesting a sign-in code from NVIDIA...", g_app.settings.provider, NULL);
 }
 
 static void load_library(void)
@@ -2154,6 +2154,7 @@ int main(int argc, char **argv)
     g_app.current_game = &g_current_game;
     g_app.zone_index = -1;
     game_art_init();
+    providers_load();
     regions_load();
     settings_load(&g_app.settings);
     if (!g_app.settings.install_id[0]) {

@@ -43,7 +43,7 @@ static void publish(void)
 static bool run_job(NetJobKind kind, const char *text, const GfnGame *game)
 {
     switch (kind) {
-    case NET_JOB_BEGIN_LOGIN: return gfn_begin_login(&g_work);
+    case NET_JOB_BEGIN_LOGIN: return gfn_begin_login(&g_work, text); /* text: provider choice */
     case NET_JOB_CANCEL_LOGIN:
         g_work.auth_state = GFN_AUTH_LOGGED_OUT;
         snprintf(g_work.status, sizeof(g_work.status), "Sign-in cancelled");
@@ -163,6 +163,13 @@ static void worker_main(void *arg)
         if (osGetTime() - last_publish >= 200) {
             publish();
             last_publish = osGetTime();
+        }
+        /* The GeForce NOW provider list, once per run when idle and no game
+         * runs: the provider setting needs it before signing in. */
+        static bool providers_done;
+        if (!providers_done && !gfn_session_active(&g_work)) {
+            providers_done = true;
+            providers_fetch();
         }
         /* Box art only downloads while no game is queued or running, so it
          * never competes with the stream for Wi-Fi. */

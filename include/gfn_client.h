@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "provider.h"
+
 /* Build 69 capped the library at 64; accounts with Steam sync can own
  * hundreds of games (the diagnostic that reported this had 219). */
 #define GFN_MAX_GAMES 256
@@ -51,6 +53,9 @@ typedef struct {
 
 typedef struct {
     GfnAuthState auth_state;
+    /* The provider a sign-in in progress goes through; it becomes the
+     * active provider (provider.h) when the sign-in completes. */
+    GfnProvider login_provider;
     char status[160];
     char user_code[32];
     char verification_uri[256];
@@ -141,7 +146,9 @@ typedef struct {
 } GfnClient;
 
 void gfn_client_init(GfnClient *client);
-bool gfn_begin_login(GfnClient *client);
+/* `provider_choice`: a provider code, or "" for NVIDIA's recommendation for
+ * this country (Settings > Account > Provider). */
+bool gfn_begin_login(GfnClient *client, const char *provider_choice);
 void gfn_tick(GfnClient *client);
 bool gfn_fetch_library(GfnClient *client);
 /* The owned library as last fetched, from the SD card (instant, offline). */

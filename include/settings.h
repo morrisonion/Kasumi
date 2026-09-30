@@ -52,6 +52,9 @@ typedef struct {
     bool net_weak;
     /* GeForce NOW server: "" auto (lowest ping), "nvidia", or a region name. */
     char server[40];
+    /* GeForce NOW provider for the next sign-in: "" = NVIDIA's pick for this
+     * country, or a provider code (provider.h). */
+    char provider[12];
     /* Send a report automatically when something goes wrong (SHARE_*). */
     unsigned share_reports;
     /* Anonymous performance summary after each session. */
