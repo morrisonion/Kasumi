@@ -44,6 +44,8 @@ static u32 *g_soc_buffer;
 static bool g_soc_ready;
 static bool g_ac_ready;
 static bool g_ptm_ready;
+/* ndm:u: exclusive Wi-Fi while a game runs (see wifi_exclusive). */
+static bool g_ndm_ready, g_ndm_exclusive;
 /* Keep the bounded token/catalog state out of the small 3DSX main stack. */
 GfnClient g_client;
 NvstSignal g_signal;
@@ -88,6 +90,12 @@ static void shutdown_services(void)
     if (g_soc_ready) socExit();
     free(g_soc_buffer);
     if (g_ptm_ready) ptmuExit();
+    if (g_ndm_exclusive) {
+        NDMU_UnlockState();
+        NDMU_LeaveExclusiveState();
+        g_ndm_exclusive = false;
+    }
+    if (g_ndm_ready) ndmuExit();
     if (g_ac_ready) acExit();
 }
 
@@ -100,6 +108,7 @@ static bool init_services(char *error, size_t error_size)
         return false;
     }
     g_ptm_ready = R_SUCCEEDED(ptmuInit());
+    g_ndm_ready = R_SUCCEEDED(ndmuInit());
     g_soc_buffer = memalign(SOC_BUFFER_ALIGNMENT, SOC_BUFFER_SIZE);
     if (!g_soc_buffer) {
         snprintf(error, error_size, "1 MiB SOC buffer allocation failed");
@@ -484,6 +493,7 @@ static void launch_game(const GfnGame *game)
 {
     prepare_game_session(game);
     g_app.limit_wait_until = g_app.limit_retry_at = 0;
+    g_app.limit_unclosable = false;
     launch_begin(false, stream_profile_weak(), g_app.auto_weak);
     submit_job(NET_JOB_START_SESSION, "Creating your cloud session...", NULL, &g_current_game);
 }
@@ -1434,6 +1444,30 @@ static void track_queue(void)
     g_app.queue_eta = -1;
 }
 
+/* The 3DS keeps doing background Wi-Fi work (StreetPass, SpotPass and
+ * notification checks) while an app streams, and each scan takes the radio
+ * off the access point for a moment. Beta.19 logs: the stream stopped for
+ * 200-280 ms at a time, frames were lost, and ~35 packets a minute had to be
+ * re-sent on a fast, nearby connection. Moonlight-N3DS takes the Wi-Fi
+ * exclusively (infrastructure only, background daemons stopped) for the
+ * same reason. Kasumi does it only while a game session runs. */
+static void wifi_exclusive(bool on)
+{
+    if (!g_ndm_ready || on == g_ndm_exclusive) return;
+    Result result;
+    if (on) {
+        result = NDMU_EnterExclusiveState(NDM_EXCLUSIVE_STATE_INFRASTRUCTURE);
+        if (R_SUCCEEDED(result)) result = NDMU_LockState();
+        g_ndm_exclusive = R_SUCCEEDED(result);
+        if (!g_ndm_exclusive) NDMU_LeaveExclusiveState();
+    } else {
+        NDMU_UnlockState();
+        result = NDMU_LeaveExclusiveState();
+        g_ndm_exclusive = false;
+    }
+    diagnostic_log("NET", "exclusive Wi-Fi %s rc=%08lX", on ? "on" : "off", (unsigned long)result);
+}
+
 /* Timer, free-tier warnings and automatic reconnects for a running session. */
 static void track_session(void)
 {
@@ -1455,11 +1489,14 @@ static void track_session(void)
                            (g_app.settings.mute_in_menus && (g_app.stream_menu || g_app.controls_open)));
 
     static bool was_active;
+    wifi_exclusive(gfn_session_active(&g_client));
     if (!gfn_session_active(&g_client)) {
         finish_history();
         if (g_perf.active) {
             perf_end(g_app.settings.install_id);
-            net_memory_note(g_perf.weak, g_perf.seconds, g_perf.lost, g_perf.repeated);
+            /* A Weak session Kasumi chose by itself counts for the network: when it
+             * went smoothly, the next session there tries Standard again. */
+            net_memory_note(g_perf.weak && !g_app.auto_weak, g_perf.seconds, g_perf.lost, g_perf.repeated);
             /* A clearly choppy session on Standard: point at Weak / hotspot
              * (beta.17 stats: one console lost ~5 frames a minute). */
             const unsigned minutes = g_perf.seconds / 60;
@@ -1917,15 +1954,21 @@ static void share_prompt_tick(void)
 
 /* Minutes NVIDIA may take to free a slot by itself (beta.18: 12 s to
  * 8 min), and how often to ask meanwhile. */
-#define LIMIT_WAIT_MS (8u * 60u * 1000u)
+#define LIMIT_WAIT_MS (12u * 60u * 1000u)
 #define LIMIT_RETRY_MS 45000u
 
 static void limit_wait_text(void)
 {
     const u64 now = osGetTime();
     const unsigned left = g_app.limit_retry_at > now ? (unsigned)((g_app.limit_retry_at - now + 999) / 1000) : 0;
+    if (g_app.limit_unclosable) {
+        snprintf(g_app.modal_text, sizeof(g_app.modal_text),
+                 "A session from an older Kasumi (or another GeForce NOW app) is still open. Only NVIDIA can "
+                 "close it now. Retrying in %u:%02u; B stops, try later.", left / 60, left % 60);
+        return;
+    }
     snprintf(g_app.modal_text, sizeof(g_app.modal_text),
-             "NVIDIA is still closing your other session. Trying again in %u:%02u (up to 8 min). "
+             "NVIDIA is still closing your other session. Trying again in %u:%02u (up to 12 min). "
              "Closing GeForce NOW on other devices helps.", left / 60, left % 60);
 }
 
@@ -1952,6 +1995,7 @@ static void launch_failed(void)
         return;
     }
     if (g_client.limit_wait) {
+        if (g_client.limit_unclosable) g_app.limit_unclosable = true;
         if (!g_app.limit_wait_until) {
             g_app.limit_wait_until = now + LIMIT_WAIT_MS;
             diagnostic_log("APP", "waiting for NVIDIA to free the session slot");
@@ -1964,7 +2008,7 @@ static void launch_failed(void)
         }
         g_app.limit_wait_until = g_app.limit_retry_at = 0;
         open_modal(MODAL_ERROR, "起動失敗", "LAUNCH FAILED",
-                   "NVIDIA didn't free your session slot in 8 minutes. Close GeForce NOW on your other "
+                   "NVIDIA didn't free your session slot in 12 minutes. Close GeForce NOW on your other "
                    "devices (or wait a little), then try again.");
         queue_auto_report("launch-failed");
         launch_end("limit", launch_share_id());
@@ -1999,6 +2043,8 @@ static void finish_jobs(void)
         show_notice("Cancelled");
     } else if ((result.kind == NET_JOB_START_SESSION || result.kind == NET_JOB_RESTART_SESSION ||
                 result.kind == NET_JOB_END_CONFLICT) && !result.ok) {
+        launch_failed();
+    } else if (result.kind == NET_JOB_CLAIM_CONFLICT && !result.ok && g_client.limit_wait) {
         launch_failed();
     } else if (result.kind == NET_JOB_CLAIM_CONFLICT && !result.ok) {
         open_modal(MODAL_ERROR, "起動失敗", "COULDN'T RESUME", g_client.status);

@@ -122,6 +122,9 @@ typedef struct {
     /* Set by the caller for one launch: a refusal waits (limit_wait)
      * instead of asking about the conflict again. */
     bool limit_quiet;
+    /* The session in the way answers 404 to this client: only NVIDIA can
+     * close it now (made by an older Kasumi or another GeForce NOW app). */
+    bool limit_unclosable;
     /* Why the last launch or session failed, short and fixed ("limit",
      * "abandoned", "entitlement"...), for the launch stats. */
     char fail_code[16];

@@ -136,6 +136,7 @@ AccessControlInfo:
     - gsp::Gpu
     - hid:USER
     - soc:U
+    - ndm:u
 
 SystemControlInfo:
   SaveDataSize            : 0KB

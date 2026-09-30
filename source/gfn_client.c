@@ -1600,6 +1600,24 @@ static bool capture_conflict(GfnClient *client, const HttpResponse *refusal, con
     return client->conflict.id[0] != '\0';
 }
 
+/* Beta.18 and older made a new client id for every launch and saved it with
+ * the running session. CloudMatch only lets that id close the session, so it
+ * is kept for this run to try on sessions that refuse the fixed id. */
+static char g_legacy_client_id[40];
+
+/* DELETE `id` as another client id (an older build's). */
+static bool cloudmatch_stop_as(GfnClient *client, const CloudBases *bases, const char *id, const char *client_id)
+{
+    char saved[sizeof(client->session_client_id)];
+    memcpy(saved, client->session_client_id, sizeof(saved));
+    snprintf(client->session_client_id, sizeof(client->session_client_id), "%s", client_id);
+    const char *headers[16]; char client_header[80], device_header[80];
+    const size_t count = cloudmatch_headers(client, headers, client_header, device_header);
+    const bool stopped = cloudmatch_stop_anywhere(bases, id, headers, count);
+    memcpy(client->session_client_id, saved, sizeof(saved));
+    return stopped;
+}
+
 /* The session this console left behind (crash, power loss), if any: stop it
  * where it was made. Only our own: an account's other sessions may be a game
  * running on the player's PC, which is theirs to end (the Resume / End
@@ -1608,16 +1626,24 @@ static void cloudmatch_stop_remembered(GfnClient *client, const char **headers, 
 {
     json_error_t error;
     json_t *root = json_load_file(ACTIVE_SESSION_PATH, 0, &error);
-    char id[160] = "", base[256] = "";
+    char id[160] = "", base[256] = "", client_id[40] = "";
     if (json_is_object(root)) {
         copy_json_string(id, sizeof(id), root, "session_id");
         copy_json_string(base, sizeof(base), root, "base_url");
+        copy_json_string(client_id, sizeof(client_id), root, "client_id");
     }
     json_decref(root);
     if (!id[0]) return;
     const CloudBases bases = { { base[0] ? base : client->session_base_url, NULL, NULL }, 1 };
-    const bool stopped = cloudmatch_stop_anywhere(&bases, id, headers, header_count);
-    diagnostic_log("CLOUDMATCH", "preflight: stopped this console's last session=%d", stopped);
+    bool stopped;
+    if (client_id[0] && strcmp(client_id, CLOUDMATCH_CLIENT_ID)) {
+        snprintf(g_legacy_client_id, sizeof(g_legacy_client_id), "%s", client_id);
+        stopped = cloudmatch_stop_as(client, &bases, id, client_id);
+        diagnostic_log("CLOUDMATCH", "preflight: stopped an older build's session=%d", stopped);
+    } else {
+        stopped = cloudmatch_stop_anywhere(&bases, id, headers, header_count);
+        diagnostic_log("CLOUDMATCH", "preflight: stopped this console's last session=%d", stopped);
+    }
     active_clear();
 }
 
@@ -1690,6 +1716,12 @@ static bool cloudmatch_resume(GfnClient *client, const char *base, const char *a
     client->session_paused = false;
     client->session_state = GFN_SESSION_SETUP;
     client->next_session_poll_at = 0;
+    /* The rig answers a RESUME with fresh endpoints; the ones read before it
+     * belong to the old connection (beta.19 report: every signalling
+     * upgrade after a takeover got 404). The next polls fill them in. */
+    memset(client->signaling_url, 0, sizeof(client->signaling_url));
+    memset(client->media_ip, 0, sizeof(client->media_ip));
+    client->media_port = 0;
     snprintf(client->status, sizeof(client->status), "Resuming your game...");
     return true;
 }
@@ -1707,6 +1739,7 @@ static void reset_launch_state(GfnClient *client)
     client->poll_failures = 0;
     client->conflict_found = false;
     client->limit_wait = false;
+    client->limit_unclosable = false;
     client->fail_code[0] = '\0';
     client->ads_required = false;
     client->ads_answered = client->ads_pending_count = 0;
@@ -1839,12 +1872,16 @@ bool gfn_end_conflict(GfnClient *client, const GfnGame *game)
     rig_base(conflict.host, rig, sizeof(rig));
     const CloudBases bases = cloud_bases(client, rig);
     snprintf(client->status, sizeof(client->status), "Closing your other session...");
-    const bool stopped = cloudmatch_stop_anywhere(&bases, conflict.id, headers, count);
+    bool stopped = cloudmatch_stop_anywhere(&bases, conflict.id, headers, count);
+    if (!stopped && g_legacy_client_id[0])
+        stopped = cloudmatch_stop_as(client, &bases, conflict.id, g_legacy_client_id);
     diagnostic_log("CLOUDMATCH", "end other session: stopped=%d", stopped);
     if (stopped) cloudmatch_wait_clear(&bases, headers, count);
     /* Whatever happened, the next refusal waits instead of asking again. */
     client->limit_quiet = true;
-    return gfn_start_session(client, game);
+    const bool ok = gfn_start_session(client, game);
+    if (!ok && !stopped) client->limit_unclosable = true;
+    return ok;
 }
 
 bool gfn_claim_conflict(GfnClient *client)
@@ -1884,10 +1921,20 @@ bool gfn_claim_conflict(GfnClient *client)
         if (client->session_state == GFN_SESSION_ERROR) client->session_state = GFN_SESSION_SETUP;
         return true;
     }
+    /* Named in the refusal but not found anywhere (beta.19 report: a
+     * session queued by beta.18, whose random client id this build can't
+     * reach, held the slot for 9+ minutes). It is not gone: it still holds
+     * the slot until NVIDIA drops it, so the launch waits for that. */
+    if (g_legacy_client_id[0] && cloudmatch_stop_as(client, &bases, conflict.id, g_legacy_client_id))
+        diagnostic_log("CLOUDMATCH", "claim: closed it with the older build's client id");
+    else
+        client->limit_unclosable = true;
     memset(client->session_id, 0, sizeof(client->session_id));
-    client->session_state = GFN_SESSION_IDLE;
-    snprintf(client->status, sizeof(client->status), "That session has ended already. Start the game again.");
-    snprintf(client->fail_code, sizeof(client->fail_code), "gone");
+    client->session_state = GFN_SESSION_ERROR;
+    client->limit_wait = true;
+    snprintf(client->status, sizeof(client->status), "NVIDIA is still closing your other session.");
+    snprintf(client->fail_code, sizeof(client->fail_code), "limit");
+    diagnostic_log("CLOUDMATCH", "claim: session not reachable; waiting for NVIDIA to free the slot");
     return false;
 }
 

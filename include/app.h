@@ -190,6 +190,8 @@ typedef struct {
     u64 limit_wait_until, limit_retry_at;
     /* The conflicting session is this same game (Resume) or another (End). */
     bool conflict_same_game;
+    /* The session in the way can't be closed from here (see gfn_client.h). */
+    bool limit_unclosable;
     /* Weak / hotspot switched on for this session because the last one on
      * this network was choppy. */
     bool auto_weak;
