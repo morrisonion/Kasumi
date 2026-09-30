@@ -674,7 +674,9 @@ int peer_connection_loop(PeerConnection* pc) {
         peer_connection_log_candidate_pairs(pc, "transport_completed");
         peer_connection_diag_log("transport_completed");
         STATE_CHANGED(pc, PEER_CONNECTION_COMPLETED);
-      } else if ((uint32_t)(ports_get_epoch_time() - pc->dtls_handshake_started_ms) >= 3500) {
+      } else if ((uint32_t)(ports_get_epoch_time() - pc->dtls_handshake_started_ms) >= 5000) {
+        /* 5 s: a freshly assigned rig took ~7 s to answer (beta.21 report
+         * 9T9HZJ); 3.5 s gave up on the right pair too soon. */
         int failed_pairs = agent_fail_nominated_remote(&pc->agent);
         peer_connection_diag_log("dtls_endpoint_timeout attempts=%d failedPairs=%d; trying next remote",
                                  pc->dtls_handshake_attempts,
@@ -767,11 +769,14 @@ int peer_connection_loop(PeerConnection* pc) {
                                      preview);
           }
 
-          if (dtls_srtp_decrypt_rtp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret) != 0) {
+          const int srtp_status = dtls_srtp_decrypt_rtp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret);
+          if (srtp_status != 0) {
             pc->rtp_decrypt_failures++;
-            peer_connection_diag_log("rtp_decrypt_failed failures=%d bytesAfter=%d",
+            /* libsrtp status: 7 auth_fail, 9 replay_fail (a duplicate),
+             * 10 replay_old (too late for the window). */
+            peer_connection_diag_log("rtp_decrypt_failed failures=%d bytesAfter=%d status=%d",
                                      pc->rtp_decrypt_failures,
-                                     pc->agent_ret);
+                                     pc->agent_ret, srtp_status);
             break;
           }
 

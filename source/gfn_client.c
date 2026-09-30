@@ -34,7 +34,7 @@ static char g_authorization_header[8300];
 
 static bool cloudmatch_status_is_transient(long status)
 {
-    return status == 429 || status == 502 || status == 503 || status == 504;
+    return status == 408 || status == 429 || status == 502 || status == 503 || status == 504;
 }
 
 static void generate_uuid(char output[40])
@@ -133,6 +133,35 @@ static void get_device_id(char output[40])
     mkdir(DATA_DIR, 0777);
     generate_uuid(output);
     file = fopen(DEVICE_PATH, "w");
+    if (file) { fputs(output, file); fclose(file); }
+}
+
+/* The device id game sessions use (x-device-id, deviceHashId). It starts as
+ * the sign-in device id and is replaced when NVIDIA refuses every launch
+ * "per device" while no session exists: beta.21 reports showed consoles
+ * refused SESSION_LIMIT_PER_DEVICE_EXCEEDED for hours, after restarts, on
+ * beta.18 and beta.21 alike, with nothing listed and no other session named.
+ * The sign-in keeps its own id, so the saved login is not affected. */
+#define SESSION_DEVICE_PATH DATA_DIR "/session-device-id.txt"
+
+static void get_session_device_id(char output[40])
+{
+    FILE *file = fopen(SESSION_DEVICE_PATH, "r");
+    if (file) {
+        const bool ok = fgets(output, 40, file) && strlen(output) >= 32;
+        fclose(file);
+        if (ok) {
+            output[strcspn(output, "\r\n")] = '\0';
+            return;
+        }
+    }
+    get_device_id(output);
+}
+
+static void new_session_device_id(char output[40])
+{
+    generate_uuid(output);
+    FILE *file = fopen(SESSION_DEVICE_PATH, "w");
     if (file) { fputs(output, file); fclose(file); }
 }
 
@@ -369,11 +398,18 @@ bool gfn_begin_login(GfnClient *client, const char *provider_choice)
             provider_nvidia(&provider);
         }
     } else {
-        providers_recommended(&provider);
+        /* Default: NVIDIA, as OpenNOW desktop. Beta.21 followed NVIDIA's
+         * recommendation for the country (as OpenNOW Vita): a player in Chile
+         * with an NVIDIA account was signed in through Digevo, got an empty
+         * library and ENTITLEMENT_FAILURE on every launch. Partner accounts
+         * pick their partner in Settings > Account. */
+        provider_nvidia(&provider);
     }
     client->login_provider = provider;
-    diagnostic_log("AUTH", "sign-in through provider %s (%s)", provider.code,
-                   provider_choice && provider_choice[0] ? "chosen" : "auto");
+    GfnProvider recommended;
+    providers_recommended(&recommended);
+    diagnostic_log("AUTH", "sign-in through provider %s (%s; recommended here %s)", provider.code,
+                   provider_choice && provider_choice[0] ? "chosen" : "default", recommended.code);
     char device_id[40];
     get_device_id(device_id);
     char form[768];
@@ -670,6 +706,13 @@ static bool fetch_catalog(GfnClient *client, const char *search_query, bool owne
     if (search_query) {
         snprintf(client->status, sizeof(client->status), "Search %.50s: %lu results",
                  search_query, (unsigned long)client->game_count);
+    } else if (!client->game_count && !provider_is_nvidia()) {
+        GfnProvider provider;
+        provider_active(&provider);
+        snprintf(client->status, sizeof(client->status),
+                 "No games on %s for this account. NVIDIA account? Pick NVIDIA in Settings > Account and "
+                 "sign in again.", provider.name);
+        diagnostic_log("CATALOG", "empty library on partner %s", provider.code);
     } else {
         snprintf(client->status, sizeof(client->status), "Loaded %lu owned games (server total %lu)",
                  (unsigned long)client->game_count, (unsigned long)client->catalog_total);
@@ -1272,9 +1315,16 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
                      "Check that it plays on play.geforcenow.com (code %d).", status_code);
         } else if (strstr(reason, "ENTITLEMENT")) {
             code = "entitlement";
-            snprintf(client->status, sizeof(client->status),
-                     "This account can't stream here. If a local partner runs GeForce NOW in your country, "
-                     "pick it in Settings > Account and sign in again (code %d).", status_code);
+            GfnProvider provider;
+            provider_active(&provider);
+            if (!provider_is_nvidia())
+                snprintf(client->status, sizeof(client->status),
+                         "This account has no %.20s access. For an NVIDIA account, pick NVIDIA in "
+                         "Settings > Account and sign in again (code %d).", provider.name, status_code);
+            else
+                snprintf(client->status, sizeof(client->status),
+                         "This account can't stream here. If a local partner runs GeForce NOW in your country, "
+                         "pick it in Settings > Account and sign in again (code %d).", status_code);
         } else if (strstr(reason, "NO_CAPACITY") || strstr(reason, "CAPACITY")) {
             code = "capacity";
             snprintf(client->status, sizeof(client->status),
@@ -1805,7 +1855,7 @@ static void reset_launch_state(GfnClient *client)
     client->media_port = 0;
     /* The fixed id (see CLOUDMATCH_CLIENT_ID) and this console's device id. */
     snprintf(client->session_client_id, sizeof(client->session_client_id), "%s", CLOUDMATCH_CLIENT_ID);
-    get_device_id(client->session_device_id);
+    get_session_device_id(client->session_device_id);
 }
 
 bool gfn_start_session(GfnClient *client, const GfnGame *game)
@@ -1888,7 +1938,29 @@ bool gfn_start_session(GfnClient *client, const GfnGame *game)
     }
     if (is_session_limit(&response)) {
         const bool named = capture_conflict(client, &response, game);
+        const bool per_device = response.body && strstr(response.body, "PER_DEVICE");
         http_response_free(&response);
+        /* Refused "per device" with no session anywhere: the slot is held by
+         * something this client can't see or end (hours, on some consoles).
+         * A fresh session device id gets a free slot; at most every 10 min. */
+        static int64_t rotated_at;
+        const int64_t now_s = (int64_t)time(NULL);
+        if (per_device && !named && !listed && (!rotated_at || now_s - rotated_at >= 600)) {
+            rotated_at = now_s;
+            char fresh[40];
+            new_session_device_id(fresh);
+            diagnostic_log("CLOUDMATCH", "per-device limit with nothing listed: new session device id, launching again");
+            snprintf(client->status, sizeof(client->status), "Getting a free session slot...");
+            client->limit_quiet = quiet;
+            const bool started = gfn_start_session(client, game);
+            /* An unexpected refusal of the new id (not a limit, capacity or
+             * queue answer): go back to the sign-in device id. */
+            if (!started && !strcmp(client->fail_code, "http")) {
+                remove(SESSION_DEVICE_PATH);
+                diagnostic_log("CLOUDMATCH", "new session device id refused; back to the sign-in id");
+            }
+            return started;
+        }
         snprintf(client->fail_code, sizeof(client->fail_code), "limit");
         client->session_state = GFN_SESSION_ERROR;
         /* Asked once per launch; the timed retries after that just wait. */
@@ -2194,6 +2266,8 @@ bool gfn_stop_session(GfnClient *client)
         }
     }
     const bool ok = (status >= 200 && status < 300) || status == 404;
+    diagnostic_log("CLOUDMATCH", "stop session: http=%ld (control %s)", status,
+                   client->session_control_url[0] ? "server" : "base");
     snprintf(client->status, sizeof(client->status), ok ? "Cloud session stopped" : "Session stop HTTP %ld", status);
     if (ok) {
         memset(client->session_id, 0, sizeof(client->session_id));

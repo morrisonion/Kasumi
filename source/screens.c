@@ -428,8 +428,7 @@ static const char *setting_value(const App *app, int setting)
         static char text[56];
         GfnProvider p;
         if (!s->provider[0]) {
-            providers_recommended(&p);
-            snprintf(text, sizeof(text), "Auto · %s", p.name);
+            snprintf(text, sizeof(text), "NVIDIA (default)");
         } else if (providers_find(s->provider, &p)) {
             snprintf(text, sizeof(text), "%s", p.name);
         } else {
@@ -534,18 +533,23 @@ static const char *setting_description(const App *app, int setting)
     case SETTING_PROVIDER: {
         /* Signed in through another provider than the one chosen: say how
          * to switch (the login belongs to its provider). */
-        static char text[200];
-        GfnProvider active, chosen;
+        static char text[240];
+        GfnProvider active, chosen, local;
         provider_active(&active);
-        if (!s->provider[0]) providers_recommended(&chosen);
-        else if (!providers_find(s->provider, &chosen)) provider_nvidia(&chosen);
+        if (!s->provider[0] || !providers_find(s->provider, &chosen)) provider_nvidia(&chosen);
         if (gfn_has_session(app->client) && strcmp(active.code, chosen.code)) {
             snprintf(text, sizeof(text), "Signed in with %s. To use %s, sign out below and sign in again.",
                      active.name, chosen.name);
             return text;
         }
-        return "Where your GeForce NOW account comes from. In some countries (Japan, Korea, Taiwan, "
-               "the Middle East...) it's run by a local partner: pick it here, then sign in. Beta.";
+        providers_recommended(&local);
+        if (strcmp(local.code, PROVIDER_NVIDIA)) {
+            snprintf(text, sizeof(text), "Most accounts are NVIDIA's. Here GeForce NOW is also sold by %.30s: "
+                     "if your subscription is from %.30s, pick it and sign in again. Beta.", local.name, local.name);
+            return text;
+        }
+        return "Most accounts are NVIDIA's. In some countries (Japan, Korea, Taiwan, the Middle East...) "
+               "GeForce NOW is sold by a local partner: if yours is, pick it, then sign in. Beta.";
     }
     }
     return "";

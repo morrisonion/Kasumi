@@ -42,6 +42,9 @@ typedef struct {
     unsigned video_source_refs;
     unsigned decoder_width;
     unsigned decoder_height;
+    /* A size MVD refused and when: not retried on every packet. */
+    unsigned decoder_failed_width, decoder_failed_height;
+    uint64_t decoder_failed_at;
     unsigned keyframe_requests;
     unsigned audio_packets;
     unsigned audio_decoded;

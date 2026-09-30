@@ -265,11 +265,17 @@ void regions_measure(void)
         ++measured;
         diagnostic_log("REGION", "ping %s %d ms", list[i].name, list[i].ms);
     }
+    bool reached = false;
+    for (unsigned i = 0; i < count; ++i) reached = reached || list[i].ms >= 0;
     LightLock_Lock(&g_lock);
     for (unsigned i = 0; i < count && i < g_count; ++i)
         if (!strcmp(g_regions[i].url, list[i].url)) g_regions[i].ms = list[i].ms;
-    current_ssid(g_measured_ssid, sizeof(g_measured_ssid));
-    g_measured_at = (int64_t)time(NULL);
+    /* Nothing answered (Wi-Fi dropped mid-way, beta.21 report 7QE6TZ): don't
+     * keep that as this network's result for a week; measure again next time. */
+    if (reached) {
+        current_ssid(g_measured_ssid, sizeof(g_measured_ssid));
+        g_measured_at = (int64_t)time(NULL);
+    }
     LightLock_Unlock(&g_lock);
     const int best = regions_fastest();
     Region chosen;

@@ -56,6 +56,8 @@ static SwkbdState g_search_keyboard;
 static bool g_quit;
 static const char *g_busy_message;
 static bool g_leave_pending;
+/* When a launch waiting for a free session slot last went out. */
+static u64 g_limit_last_try;
 static bool g_screenshot_requested;
 static void show_notice(const char *text);
 static void apply_game_options(const GamePrefs *prefs);
@@ -469,6 +471,7 @@ static void prepare_game_session(const GfnGame *game)
     settings_apply_picture(&g_app.settings);
     g_app.auto_weak = false;
     g_app.recover_tried = false;
+    g_app.setup_retries = 0;
     if (!g_app.settings.net_weak && net_memory_choppy_here()) {
         stream_profile_set_weak(true);
         g_app.auto_weak = true;
@@ -491,6 +494,13 @@ static const char *launch_share_id(void)
 
 static void launch_game(const GfnGame *game)
 {
+    static u64 last_launch;
+    const u64 now = osGetTime();
+    if (last_launch && now - last_launch < 8000) {
+        show_notice("One moment - launching again too fast makes NVIDIA refuse for a minute");
+        return;
+    }
+    last_launch = now;
     prepare_game_session(game);
     g_app.limit_wait_until = g_app.limit_retry_at = 0;
     g_app.limit_unclosable = false;
@@ -522,6 +532,13 @@ static void leave_session(void)
     launch_end("cancel", launch_share_id());
     g_app.limit_wait_until = g_app.limit_retry_at = 0;
     close_media();
+    /* Already ending it: a second Leave must not cancel that DELETE (beta.21
+     * report H4R-NPH: "Session stop network: Cancelled", and the next launch
+     * was refused per device). */
+    if (net_worker_current_job() == NET_JOB_STOP_SESSION) {
+        g_leave_pending = false;
+        return;
+    }
     /* If the worker is mid-request, cancel it and stop once it is free. */
     if (net_worker_busy()) {
         net_worker_cancel();
@@ -805,7 +822,12 @@ static void handle_modal(u32 down, AppAction action)
         return;
     }
     if (modal == MODAL_LIMIT_WAIT) {
-        if (confirm) {
+        if (confirm && osGetTime() - g_limit_last_try < 20000) {
+            /* Pressing Try now over and over drew NVIDIA's rate limit (429)
+             * in beta.21 reports: one try per 20 s. */
+            g_app.modal = MODAL_LIMIT_WAIT;
+            show_notice("Just tried - wait a few seconds before trying again");
+        } else if (confirm) {
             g_app.limit_retry_at = osGetTime();
         } else {
             diagnostic_log("APP", "stopped waiting for NVIDIA to free the slot");
@@ -1922,13 +1944,35 @@ static void stats_tick(void)
     if (submit_job(NET_JOB_SEND_STATS, NULL, NULL, NULL)) g_stats_inflight = true;
 }
 
+/* Before the first frame, a failed connection (signalling refused, the
+ * encrypted media link not answering) is retried by itself, twice. Beta.21
+ * report 9T9HZJ: a fresh rig ignored DTLS for ~7 s, the reconnect then hit
+ * "peer removed", and the player's own retry streamed at once. */
+#define SETUP_RETRIES 2
+
+static void setup_retry_tick(void)
+{
+    if (!gfn_session_active(&g_client) || g_app.stream_started_at || g_leave_pending || net_worker_busy() ||
+        net_worker_signal_starting() || g_client.session_state != GFN_SESSION_READY)
+        return;
+    const bool signal_failed = g_signal.state == NVST_SIGNAL_ERROR;
+    const bool media_failed = g_transport.state == WEBRTC_FAILED;
+    if ((!signal_failed && !media_failed) || g_app.setup_retries >= SETUP_RETRIES) return;
+    ++g_app.setup_retries;
+    diagnostic_log("APP", "connection failed before the stream (%.80s); automatic retry %u",
+                   signal_failed ? g_signal.status : g_transport.status, g_app.setup_retries);
+    show_notice("Connection failed - trying again");
+    retry_session();
+}
+
 /* A session that fails at any stage (queue, rig setup, stream). */
 static void watch_session_errors(void)
 {
     static bool was_error;
     const bool error = gfn_session_active(&g_client) &&
                        (g_client.session_state == GFN_SESSION_ERROR ||
-                        (g_signal.state == NVST_SIGNAL_ERROR && !g_app.stream_started_at));
+                        (g_signal.state == NVST_SIGNAL_ERROR && !g_app.stream_started_at &&
+                         g_app.setup_retries >= SETUP_RETRIES));
     if (error && !was_error) {
         diagnostic_log("APP", "session failed: %.120s", g_client.session_state == GFN_SESSION_ERROR ? g_client.status : g_signal.status);
         queue_auto_report(g_app.stream_started_at ? "session-error" : "queue-or-setup-failed");
@@ -2029,6 +2073,7 @@ static void limit_wait_tick(void)
     g_app.limit_retry_at = 0;
     g_app.modal = MODAL_NONE;
     diagnostic_log("APP", "trying the launch again");
+    g_limit_last_try = osGetTime();
     submit_job(NET_JOB_START_SESSION, "Trying again...", "retry", &g_current_game);
 }
 
@@ -2336,6 +2381,7 @@ int main(int argc, char **argv)
         g_app.status = current_status();
         g_app.toast = g_notice[0] && osGetTime() < g_notice_until ? g_notice : NULL;
         track_session();
+        setup_retry_tick();
         watch_session_errors();
         launch_track(&g_client);
         limit_wait_tick();

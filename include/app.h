@@ -185,6 +185,8 @@ typedef struct {
     /* The signalling said the session is gone: one check with CloudMatch
      * (it may only be paused) before giving up. */
     bool recover_tried;
+    /* Automatic retries of a connection that failed before the first frame. */
+    unsigned setup_retries;
     /* Launch waiting for NVIDIA to free the slot: give up at `until`, next
      * try at `retry_at` (0 = not waiting). */
     u64 limit_wait_until, limit_retry_at;

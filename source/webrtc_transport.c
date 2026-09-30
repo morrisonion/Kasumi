@@ -367,8 +367,13 @@ static void on_video(const PeerVideoPacket *packet, void *userdata)
     }
     if (t->video_access_units == 1) diagnostic_checkpoint();
     if (stream_profile_probing()) return;
-    const unsigned decode_width = t->video_source_width ? t->video_source_width :
+    /* MVD takes the coded size: whole 16-pixel macroblocks. The SPS size is
+     * the cropped one, which NVIDIA's adaptive resolution makes odd (beta.21:
+     * 726x544 and 680x544 were refused with D9617108 / D961710D, hundreds of
+     * times, and the picture froze until the player left). */
+    const unsigned source_width = t->video_source_width ? t->video_source_width :
                                   stream_profile_width();
+    const unsigned decode_width = (source_width + 15u) & ~15u;
     const unsigned source_height = t->video_source_height ? t->video_source_height :
                                    stream_profile_height();
     const unsigned decode_height = (source_height + 15u) & ~15u;
@@ -387,9 +392,21 @@ static void on_video(const PeerVideoPacket *packet, void *userdata)
                        decode_width, decode_height);
         mvd_video_close();
     }
-    if (!mvd_video_active() && !mvd_video_init(decode_width, decode_height)) {
-        snprintf(t->status, sizeof(t->status), "Video arrived; %.140s", mvd_video_status());
-        return;
+    if (!mvd_video_active()) {
+        const uint64_t now = osGetTime();
+        if (t->decoder_failed_width == decode_width && t->decoder_failed_height == decode_height &&
+            now - t->decoder_failed_at < 2000)
+            return;
+        if (!mvd_video_init(decode_width, decode_height)) {
+            t->decoder_failed_width = decode_width;
+            t->decoder_failed_height = decode_height;
+            t->decoder_failed_at = now;
+            snprintf(t->status, sizeof(t->status), "Video arrived; %.140s", mvd_video_status());
+            /* A fresh keyframe may bring a size MVD takes. */
+            if (now - t->last_keyframe_request_at >= 2000) request_video_keyframe(t, "decoder_config_failed");
+            return;
+        }
+        t->decoder_failed_width = t->decoder_failed_height = 0;
     }
     t->decoder_width = decode_width;
     t->decoder_height = decode_height;
