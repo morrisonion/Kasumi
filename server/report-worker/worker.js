@@ -17,6 +17,8 @@
 //   POST /stats                        anonymous session performance summary
 //   GET  /stats?key=ADMIN_KEY          performance page (averages + recent)
 //   GET  /api/stats?days=90            raw summaries as JSON (for dashboard.html)
+//   POST /launches                     anonymous launch records (how each launch ended)
+//   GET  /api/launches?days=90         launch records as JSON
 //   GET  /api/reports                  report list as JSON
 // Read routes take the key as ?key= or an "X-Admin-Key" header, and allow
 // cross-origin reads so the local dashboard.html can use them.
@@ -40,6 +42,8 @@ export default {
     try {
       if (request.method === "GET" && url.pathname === "/api/stats") return await apiStats(url, env);
       if (request.method === "GET" && url.pathname === "/api/reports") return await apiReports(url, env);
+      if (request.method === "GET" && url.pathname === "/api/launches") return await apiLaunches(url, env);
+      if (request.method === "POST" && url.pathname === "/launches") return await submitLaunches(request, env);
       if (request.method === "POST" && url.pathname === "/report") return await submit(request, env);
       if (request.method === "GET" && url.pathname === "/reports") return await list(url, env);
       if (request.method === "POST" && url.pathname === "/stats") return await submitStats(request, env);
@@ -268,6 +272,63 @@ async function submitStats(request, env) {
   const id = "s:" + String(9999999999999 - stat.t).padStart(13, "0") + ":" + newCode();
   await env.REPORTS.put(id, "", { expirationTtl: STATS_KEEP_SECONDS, metadata: stat });
   return json({ ok: true });
+}
+
+// ---- Launch records -------------------------------------------------------
+//
+// One per launch attempt (source/launch_stats.c): how it ended, queue time,
+// time to first frame. Sent in batches; each is kept as KV metadata like the
+// session summaries.
+
+const LAUNCH_FIELDS = {
+  v: "string", b: "string", i: "string", r: "string", o: "string",
+  q: "number", qp: "number", s: "number", ff: "number", ad: "number", c: "number",
+  rs: "number", m: "number", aw: "number",
+};
+
+async function submitLaunches(request, env) {
+  if (Number(request.headers.get("content-length") || 0) > 16384) return json({ error: "too large" }, 413);
+  if (await limited(env, request, "rl:", STATS_PER_HOUR)) return json({ error: "rate limited" }, 429);
+  let raw;
+  try {
+    raw = JSON.parse(await request.text());
+  } catch {
+    return json({ error: "bad request" }, 400);
+  }
+  if (!raw || raw.app !== "Kasumi" || !Array.isArray(raw.launches)) return json({ error: "not Kasumi launches" }, 400);
+  const list = raw.launches.slice(0, 30);
+  const now = Date.now();
+  let stored = 0;
+  for (let n = 0; n < list.length; n++) {
+    const item = list[n];
+    if (!item || typeof item !== "object") continue;
+    // Oldest first in the batch: keep their order in the listing.
+    const rec = { t: now - (list.length - n) };
+    for (const [name, type] of Object.entries(LAUNCH_FIELDS)) {
+      const value = item[name];
+      if (type === "number" && Number.isFinite(value)) rec[name] = Math.round(value);
+      if (type === "string" && typeof value === "string") rec[name] = value.slice(0, 40);
+    }
+    if (!rec.o) continue;
+    const id = "l:" + String(9999999999999 - rec.t).padStart(13, "0") + ":" + newCode();
+    await env.REPORTS.put(id, "", { expirationTtl: STATS_KEEP_SECONDS, metadata: rec });
+    ++stored;
+  }
+  return json({ ok: true, stored });
+}
+
+async function apiLaunches(url, env) {
+  if (!authorised(url, env)) return json({ error: "not authorised" }, 401);
+  const days = Math.min(90, Math.max(1, Number(url.searchParams.get("days")) || 90));
+  const since = Date.now() - days * 86400000;
+  const rows = [];
+  let cursor;
+  do {
+    const page = await env.REPORTS.list({ prefix: "l:", limit: 1000, cursor });
+    for (const k of page.keys) if (k.metadata && k.metadata.t >= since) rows.push(k.metadata);
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor && rows.length < 10000);
+  return json({ days, rows });
 }
 
 async function loadStats(env, max = 5000) {

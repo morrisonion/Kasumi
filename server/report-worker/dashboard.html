@@ -165,6 +165,13 @@
       <div class="card"><h2>Hitches per minute, by version</h2><p class="hint">Repeated frames from the pacer. Lower is better</p><div class="chart" id="c-hitch"></div></div>
     </div>
     <div class="card" style="margin-bottom:18px">
+      <h2>Launches</h2><p class="hint">Every launch attempt (beta.19 on): how many reached a game, and why the rest did not</p>
+      <div class="grid2" style="margin:0">
+        <div class="chart" id="c-outcomes"></div>
+        <div class="scroll"><table id="t-launch"></table></div>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:18px">
       <div class="bar" style="margin-bottom:8px">
         <h2 style="margin:0">Breakdown</h2>
         <div class="seg" role="group" aria-label="Group by" id="groupby" style="margin-left:auto">
@@ -201,7 +208,11 @@
 "use strict";
 const SERVICE = "https://kasumi-reports.p0mpurin.workers.dev";
 const BITRATES = ["Adaptive", "Steady 1 Mbps", "Steady 1.2 Mbps", "Steady 1.5 Mbps"];
-const state = { key: "", days: 30, tab: "perf", group: "v", stats: [], reports: [], report: null };
+const state = { key: "", days: 30, tab: "perf", group: "v", stats: [], launches: [], reports: [], report: null };
+const OUTCOMES = { ok: "Reached the game", limit: "Session in use", abandoned: "Dropped from queue", cancel: "Cancelled by player",
+  entitlement: "Not entitled", limited: "Limited mode", capacity: "No free rigs", maintenance: "Game in maintenance",
+  "429": "Rate limited", busy: "Servers busy", network: "No connection", gone: "Session ended", setup: "Failed in setup",
+  claim: "Resume failed", resume: "Resume failed", paused: "Paused by NVIDIA", http: "Other CloudMatch error", error: "Other error" };
 
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -226,9 +237,11 @@ async function load() {
   if (!state.key) { setStatus("Enter your admin key first.", true); return; }
   setStatus("Loading…");
   try {
-    const [stats, reports] = await Promise.all([api("/api/stats?days=90"), api("/api/reports")]);
+    const [stats, reports, launches] = await Promise.all([api("/api/stats?days=90"), api("/api/reports"),
+      api("/api/launches?days=90").catch(() => ({ rows: [] }))]);
     state.stats = stats.rows || [];
     state.reports = reports.rows || [];
+    state.launches = launches.rows || [];
     $("welcome").classList.add("hidden");
     render();
     setStatus(`Updated ${new Date().toLocaleTimeString()} · ${state.stats.length} sessions, ${state.reports.length} reports in 90 days`);
@@ -435,6 +448,36 @@ function renderPerf() {
     }).join("");
 }
 
+function median(values) {
+  const v = values.filter(Number.isFinite).sort((a, b) => a - b);
+  return v.length ? v[Math.floor(v.length / 2)] : NaN;
+}
+
+function renderLaunches() {
+  const rows = inRange(state.launches);
+  if (!rows.length) {
+    $("c-outcomes").innerHTML = `<svg viewBox="0 0 ${W} ${H}"><text class="empty" x="${W / 2}" y="${H / 2}" text-anchor="middle">No launch records yet (beta.19 and later)</text></svg>`;
+    $("t-launch").innerHTML = "";
+    return;
+  }
+  const counts = new Map();
+  for (const r of rows) counts.set(r.o, (counts.get(r.o) || 0) + 1);
+  const items = [...counts.entries()].sort((a, b) => b[1] - a[1])
+    .map(([o, n]) => ({ label: OUTCOMES[o] || o, short: o, value: n, extra: `${fmt((n / rows.length) * 100, 0)}% of launches` }));
+  columnChart($("c-outcomes"), items, { valueLabel: "launches" });
+  const byVersion = new Map();
+  for (const r of rows) { if (!byVersion.has(r.v)) byVersion.set(r.v, []); byVersion.get(r.v).push(r); }
+  $("t-launch").innerHTML = "<tr><th>Version</th><th>Launches</th><th>Consoles</th><th>Reached game</th><th>Queue (median)</th><th>To ready</th><th>First frame</th><th>Ads asked</th><th>Session in use</th></tr>" +
+    [...byVersion.entries()].sort((a, b) => String(b[0]).localeCompare(String(a[0]), undefined, { numeric: true })).map(([v, list]) => {
+      const ok = list.filter((r) => r.o === "ok");
+      const tried = list.filter((r) => r.o !== "cancel").length || 1;
+      return `<tr><td><b>${esc(v)}</b></td><td>${list.length}</td><td>${new Set(list.map((r) => r.i)).size}</td>` +
+        `<td>${fmt((ok.length / tried) * 100, 0)}%</td><td>${fmt(median(list.filter((r) => r.q > 0).map((r) => r.q)), 0)} s</td>` +
+        `<td>${fmt(median(ok.map((r) => r.s)), 0)} s</td><td>${fmt(median(ok.map((r) => r.ff)) / 1000, 1)} s</td>` +
+        `<td>${fmt((list.filter((r) => r.ad).length / list.length) * 100, 0)}%</td><td>${fmt((list.filter((r) => r.c).length / list.length) * 100, 0)}%</td></tr>`;
+    }).join("");
+}
+
 function renderReports() {
   const since = Date.now() - state.days * 86400000;
   const rows = state.reports.filter((r) => Date.parse(r.at) >= since);
@@ -482,7 +525,7 @@ $("v-dump").addEventListener("click", async () => {
 function render() {
   $("perf").classList.toggle("hidden", state.tab !== "perf");
   $("reports").classList.toggle("hidden", state.tab !== "reports");
-  if (state.tab === "perf") renderPerf(); else renderReports();
+  if (state.tab === "perf") { renderPerf(); renderLaunches(); } else renderReports();
 }
 
 function pressOnly(group, button) {
@@ -509,14 +552,15 @@ $("export").addEventListener("click", async () => {
   if (!state.key) { setStatus("Enter your admin key first.", true); return; }
   try {
     setStatus("Exporting…");
-    const [stats, reports] = await Promise.all([api("/api/stats?days=90"), api("/api/reports")]);
+    const [stats, reports, launches] = await Promise.all([api("/api/stats?days=90"), api("/api/reports"),
+      api("/api/launches?days=90").catch(() => ({ rows: [] }))]);
     const logs = {};
     let done = 0;
     for (const r of reports.rows || []) {
       try { logs[r.code] = await api("/report/" + r.code, "text"); } catch (error) { logs[r.code] = "(could not load: " + error.message + ")"; }
       setStatus(`Exporting… ${++done}/${(reports.rows || []).length} reports`);
     }
-    const file = { exported_at: new Date().toISOString(), sessions: stats.rows || [], reports: reports.rows || [], report_logs: logs };
+    const file = { exported_at: new Date().toISOString(), sessions: stats.rows || [], launches: launches.rows || [], reports: reports.rows || [], report_logs: logs };
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([JSON.stringify(file, null, 1)], { type: "application/json" }));
     a.download = "kasumi-export-" + new Date().toISOString().slice(0, 10) + ".json";
