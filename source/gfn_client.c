@@ -1559,14 +1559,18 @@ static bool is_session_limit(const HttpResponse *response)
     return strstr(response->body, "SESSION_LIMIT") != NULL || strstr(response->body, "4AF1201E") != NULL;
 }
 
-/* The session a SESSION_LIMIT refusal names ("otherUserSessions", then
- * "session"): its id, rig, game and state. */
+/* The session a SESSION_LIMIT refusal names in "otherUserSessions": its id,
+ * rig, game and state. The refusal's own "session" is this launch echoed
+ * back (status 1, the requested game, never created): beta.18 and beta.19
+ * tried to close or resume it and always got 404. A per-device refusal
+ * often names no other session at all; then NVIDIA is still closing this
+ * console's last one, and the launch just waits. */
 static bool capture_conflict(GfnClient *client, const HttpResponse *refusal, const GfnGame *game)
 {
     memset(&client->conflict, 0, sizeof(client->conflict));
     json_error_t error;
     json_t *root = json_loadb(refusal->body ? refusal->body : "", refusal->size, 0, &error);
-    json_t *candidates[ZOMBIE_MAX + 1];
+    json_t *candidates[ZOMBIE_MAX];
     unsigned count = 0;
     json_t *others = root ? json_object_get(root, "otherUserSessions") : NULL;
     size_t index;
@@ -1574,8 +1578,6 @@ static bool capture_conflict(GfnClient *client, const HttpResponse *refusal, con
     json_array_foreach(others, index, other) {
         if (count < ZOMBIE_MAX && json_is_object(other)) candidates[count++] = other;
     }
-    json_t *session = root ? json_object_get(root, "session") : NULL;
-    if (json_is_object(session)) candidates[count++] = session;
     unsigned named = 0;
     for (unsigned i = 0; i < count; ++i) {
         char id[160] = "";
@@ -1592,7 +1594,7 @@ static bool capture_conflict(GfnClient *client, const HttpResponse *refusal, con
     }
     json_decref(root);
     char rig[160];
-    diagnostic_log("CLOUDMATCH", "session limit: %u session(s) named; first status=%d sameGame=%d rig=%s",
+    diagnostic_log("CLOUDMATCH", "session limit: %u other session(s) named; first status=%d sameGame=%d rig=%s",
                    named, client->conflict.status,
                    client->conflict.app_id[0] && game && !strcmp(client->conflict.app_id, game->app_id),
                    rig_base(client->conflict.host, rig, sizeof(rig)) ? client->conflict.host :
