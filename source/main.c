@@ -503,7 +503,7 @@ static void launch_game(const GfnGame *game)
     last_launch = now;
     prepare_game_session(game);
     g_app.limit_wait_until = g_app.limit_retry_at = 0;
-    g_app.limit_unclosable = false;
+    g_app.limit_unclosable = g_app.limit_rate = false;
     launch_begin(false, stream_profile_weak(), g_app.auto_weak);
     submit_job(NET_JOB_START_SESSION, "Creating your cloud session...", NULL, &g_current_game);
 }
@@ -832,7 +832,7 @@ static void handle_modal(u32 down, AppAction action)
         } else {
             diagnostic_log("APP", "stopped waiting for NVIDIA to free the slot");
             g_app.limit_wait_until = g_app.limit_retry_at = 0;
-            launch_end("limit", launch_share_id());
+            launch_end(g_app.limit_rate ? "429" : "limit", launch_share_id());
         }
         return;
     }
@@ -1996,15 +1996,30 @@ static void share_prompt_tick(void)
     open_modal(MODAL_SHARE_ASK, "協力", "HELP IMPROVE KASUMI?", "");
 }
 
-/* Minutes NVIDIA may take to free a slot by itself (beta.18: 12 s to
- * 8 min), and how often to ask meanwhile. */
-#define LIMIT_WAIT_MS (12u * 60u * 1000u)
-#define LIMIT_RETRY_MS 45000u
+/* How long NVIDIA may take to free a slot by itself (beta.18: 12 s to
+ * 8 min), and the pause before each try: 1:30, growing to 3:00. In beta.22
+ * reports a try every 45 s drew NVIDIA's rate limit (429) after a few, and
+ * the consoles that got in did so after a few quiet minutes. */
+#define LIMIT_WAIT_MS (15u * 60u * 1000u)
+static unsigned g_limit_tries;
+
+static u64 limit_retry_delay(void)
+{
+    const u64 delay = 90000u + 30000u * (u64)g_limit_tries;
+    if (g_app.limit_rate && delay < 120000u) return 120000u;
+    return delay < 180000u ? delay : 180000u;
+}
 
 static void limit_wait_text(void)
 {
     const u64 now = osGetTime();
     const unsigned left = g_app.limit_retry_at > now ? (unsigned)((g_app.limit_retry_at - now + 999) / 1000) : 0;
+    if (g_app.limit_rate) {
+        snprintf(g_app.modal_text, sizeof(g_app.modal_text),
+                 "NVIDIA asked Kasumi to slow down after several launches. Trying again in %u:%02u by itself.",
+                 left / 60, left % 60);
+        return;
+    }
     if (g_app.limit_unclosable) {
         snprintf(g_app.modal_text, sizeof(g_app.modal_text),
                  "A session from an older Kasumi (or another GeForce NOW app) is still open. Only NVIDIA can "
@@ -2012,7 +2027,7 @@ static void limit_wait_text(void)
         return;
     }
     snprintf(g_app.modal_text, sizeof(g_app.modal_text),
-             "NVIDIA is still closing your other session. Trying again in %u:%02u (up to 12 min). "
+             "NVIDIA is still closing your other session. Trying again in %u:%02u (up to 15 min). "
              "Closing GeForce NOW on other devices helps.", left / 60, left % 60);
 }
 
@@ -2040,22 +2055,27 @@ static void launch_failed(void)
     }
     if (g_client.limit_wait) {
         if (g_client.limit_unclosable) g_app.limit_unclosable = true;
+        g_app.limit_rate = g_client.limit_rate;
         if (!g_app.limit_wait_until) {
             g_app.limit_wait_until = now + LIMIT_WAIT_MS;
-            diagnostic_log("APP", "waiting for NVIDIA to free the session slot");
+            g_limit_tries = 0;
+            diagnostic_log("APP", "%s", g_app.limit_rate ? "NVIDIA is rate limiting launches: waiting"
+                                                         : "waiting for NVIDIA to free the session slot");
         }
         if (now < g_app.limit_wait_until) {
-            g_app.limit_retry_at = now + LIMIT_RETRY_MS;
+            g_app.limit_retry_at = now + limit_retry_delay();
+            ++g_limit_tries;
             open_modal(MODAL_LIMIT_WAIT, "待機中", "ALMOST THERE", "");
             limit_wait_text();
             return;
         }
         g_app.limit_wait_until = g_app.limit_retry_at = 0;
-        open_modal(MODAL_ERROR, "起動失敗", "LAUNCH FAILED",
-                   "NVIDIA didn't free your session slot in 12 minutes. Close GeForce NOW on your other "
-                   "devices (or wait a little), then try again.");
+        open_modal(MODAL_ERROR, "起動失敗", "LAUNCH FAILED", g_app.limit_rate
+                   ? "NVIDIA kept refusing launches for 15 minutes. Wait a little, then try again."
+                   : "NVIDIA didn't free your session slot in 15 minutes. Close GeForce NOW on your other "
+                     "devices (or wait a little), then try again.");
         queue_auto_report("launch-failed");
-        launch_end("limit", launch_share_id());
+        launch_end(g_app.limit_rate ? "429" : "limit", launch_share_id());
         return;
     }
     open_modal(MODAL_ERROR, "起動失敗", "LAUNCH FAILED", g_client.status);

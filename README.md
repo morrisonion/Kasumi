@@ -59,6 +59,18 @@ back. It is not affiliated with NVIDIA or with the OpenNOW project.
   </tr>
 </table>
 
+- **Works in your country**: *Server* on Auto pings every GeForce NOW server
+  and uses the fastest, measured again on each new Wi-Fi network. Where
+  GeForce NOW is sold by a local partner (the GeForce NOW Alliance), pick it
+  in Settings and sign in with that account.
+- **Gets you into the game**: Kasumi follows your place in the queue as
+  NVIDIA moves it between servers, offers to resume or end a game still
+  running on your account, and when NVIDIA is still releasing your last
+  session it counts down and tries again by itself.
+- **Steadier Wi-Fi while you play**: StreetPass, SpotPass and other
+  background Wi-Fi work pause during a game (like Moonlight does), so the
+  radio stays on the stream. If a network was choppy last time, the next
+  session there starts in *Weak / hotspot* mode by itself.
 - **Your library with box art**, saved on the SD card so it opens instantly,
   with All / Favourites / Recent tabs and a page for every game.
 - **Per-game options**: bitrate, gyro, button layout and a fully **custom
@@ -76,7 +88,8 @@ back. It is not affiliated with NVIDIA or with the OpenNOW project.
   automatic reconnect, including after closing the lid, back onto the same
   rig.
 - **First-run guide** that walks you through everything (skippable).
-- **Updates itself** from GitHub, with release notes on the console.
+- **Updates itself** from GitHub, with release notes on the console; the
+  update page opens by itself when a new version is out.
 
 ## Screenshots
 
@@ -98,8 +111,8 @@ back. It is not affiliated with NVIDIA or with the OpenNOW project.
 - A **New** Nintendo 3DS, New 3DS XL or New 2DS XL (the original 3DS lacks the
   video decoder).
 - Custom firmware ([Luma3DS](https://3ds.hacks.guide/)) to install homebrew.
-- A GeForce NOW account (the free tier works, with a queue and one-hour
-  sessions).
+- A GeForce NOW account, from NVIDIA or from a GeForce NOW Alliance partner
+  (the free tier works, with a queue and one-hour sessions).
 - 2.4 GHz Wi-Fi with a good signal (3 bars is best).
 
 ## Install
@@ -125,6 +138,9 @@ checked against the release's SHA256SUMS before anything is installed.
 1. Open Kasumi and follow the short guide.
 2. Press **A** to sign in. Open the web address shown on your phone or
    computer and enter the code. No password is ever typed on the 3DS.
+   Most accounts are NVIDIA's (the default). If you bought GeForce NOW from a
+   local partner, first pick it in **Settings > Account > GeForce NOW
+   provider**, then sign in.
 3. Your library loads with box art. Press **A** on a game to open it, then
    **A** again to play.
 4. During play, hold **START + SELECT** for the stream menu.
@@ -162,8 +178,10 @@ click, D-Pad direction, or nothing. Only that game uses the mapping.
   *Steady 1 Mbps* (Settings, or just for one game in its Options).
 - **Phone hotspot or far from the router?** Set Settings > Network >
   *Connection type* to **Weak / hotspot**: a steadier, slightly softer picture
-  that copes with mobile data. *Server* on Auto picks the GeForce NOW server
-  with the lowest ping from wherever you are.
+  that copes with mobile data.
+- **High ping?** Settings > Network > *Server* on Auto picks the GeForce NOW
+  server with the lowest ping from wherever you are; you can also pick one
+  yourself.
 - **Small text?** Use ZOOM and drag the map; save the spot as a zoom zone.
 - **Gyro:** *While aiming* only steers while ZL is held, which suits most
   shooters.
@@ -222,22 +240,40 @@ Cloud, Epic, Ubisoft...) or the game's own account. Leaving the stream closes
 the game at once, so **quit from the game's own menu first** to let it save
 and sync. Also check you launched the same store's version as before.
 
-**GeForce NOW in my country is sold by an internet provider. Does it work?**
-Not yet. In some countries GeForce NOW is run by a local partner (the
-GeForce NOW Alliance) with its own accounts and servers; Kasumi only works
-with NVIDIA's own service for now.
+**GeForce NOW in my country is sold by a local partner. Does it work?**
+Yes (still new). In some countries GeForce NOW is run by a GeForce NOW
+Alliance partner with its own accounts and servers. Open **Settings > Account
+> GeForce NOW provider**, pick your partner, sign out if you were signed in,
+and sign in again; your library, servers and sessions then go through that
+partner. The list comes from NVIDIA, and players have confirmed it works with
+ABYA and Digevo (Chile) and Pentanet (Australia). Keep *NVIDIA* if your
+account is NVIDIA's own, even when a partner exists in your country. Partner
+queues can be much longer than NVIDIA's.
 
-**"Launch failed" with HTTP 403, 429 or 500?**
-- **403 (session limit)**: a previous session had not fully closed on
-  NVIDIA's side. Since 0.9.0-beta.18 Kasumi closes such leftover sessions by
-  itself; if it still appears, wait a minute and make sure GeForce NOW is not
-  open on another device or browser tab.
-- **429 (too many requests)**: NVIDIA is limiting launch attempts after
-  several in a row. Wait a minute; Kasumi pauses launches for you.
-- **500 "limited mode"**: NVIDIA has restricted streaming on the account
-  itself. Check whether it can play on
+**"This account can't stream here" or an empty library?**
+Usually the account and the provider don't match: an NVIDIA account signed in
+through a partner, or a partner account signed in through NVIDIA. Change
+**Settings > Account > GeForce NOW provider**, sign out and sign in again.
+
+**"Launch failed" or a countdown before my game starts?**
+- **Session limit (HTTP 403)**: NVIDIA still counts an earlier session (it
+  can take a few minutes to release one), or GeForce NOW is open on another
+  device. If a game is running elsewhere, Kasumi offers to resume it here or
+  end it; otherwise it counts down and tries again by itself. Closing
+  GeForce NOW on your other devices and browser tabs helps.
+- **Too many requests (HTTP 429)**: NVIDIA limits launch attempts after
+  several in a row. Kasumi waits it out and tries again by itself; pressing
+  launch over and over makes it last longer.
+- **"Limited mode" (HTTP 500)**: NVIDIA has restricted streaming on the
+  account itself. Check whether it can play on
   [play.geforcenow.com](https://play.geforcenow.com); if not, the account needs
   sorting out with NVIDIA.
+
+**Kasumi asked me to sign in again. Why?**
+Your login is renewed in the background. If NVIDIA can't be reached at that
+moment (no Wi-Fi yet, a busy server), Kasumi keeps your login and just asks
+you to try again; you only need to sign in again when NVIDIA no longer
+accepts the old login.
 
 **Does it run on an emulator (Citra / Azahar)?**
 No. Kasumi needs the New 3DS hardware video decoder and a real network
@@ -256,32 +292,55 @@ navigating launchers, sign-in screens and chat, not for playing.
 
 ## Privacy
 
-Your login is stored only on your SD card in `sdmc:/3ds/kasumi/gfn-session.json`.
-**Never share that file.** The diagnostic logs (`kasumi-diagnostic.txt` and
-`kasumi-diagnostic-previous.txt`) exclude tokens and passwords and are safe to
-attach to bug reports.
+**Who Kasumi talks to.** NVIDIA (sign-in, your library, servers and game
+sessions), or your GeForce NOW partner if you picked one; GitHub, to check
+for and download updates; and Kasumi's report service, only if you allow it
+(below). When a game starts, the stream also asks NVIDIA's and Google's
+public STUN servers for your public address, as browsers do for video calls
+and GeForce NOW in a browser; nothing else is sent to them.
 
-Sharing diagnostics is opt-in. Kasumi asks once, **"Help improve Kasumi?"**.
-If you choose *Share*, it sends two things:
+**What stays on your SD card** (`sdmc:/3ds/kasumi/`):
+
+- `gfn-session.json`: your login. **Never share that file.** No password is
+  in it (you never type one on the 3DS), but it lets anyone use your
+  GeForce NOW account until it expires.
+- Your settings, library cache, chosen provider, a random console ID made by
+  Kasumi, and the diagnostic logs.
+- The names of Wi-Fi networks you played on, with their fastest server and
+  whether the last session there was choppy. They are used to pick the server
+  and *Weak / hotspot* mode, and are never logged or sent anywhere.
+
+The diagnostic logs (`kasumi-diagnostic.txt` and
+`kasumi-diagnostic-previous.txt`) exclude tokens, passwords and anything you
+type, and are safe to attach to bug reports.
+
+**Sharing is opt-in.** Kasumi asks once, **"Help improve Kasumi?"**. If you
+choose *Share*, it sends:
 
 - **Problem reports**: the log, on its own when something goes wrong (the
   previous run crashed, froze or lost power, a game failed to launch, or the
   stream could not reconnect), at most once per run and never during a game.
 - **Performance stats**: after each session of 30 seconds or more, a few
-  anonymous numbers (session length, game, server, ping, bitrate, frame rate,
-  lost and repeated frames, reconnects, decode time). No log text, no
-  addresses. Kept 90 days.
+  numbers (session length, game, server, ping, bitrate, frame rate, lost and
+  repeated frames, reconnects, decode time), and for each launch whether the
+  game started and why not, the provider, queue time and how long it took.
+  Each comes with Kasumi's version and the random install ID, so one
+  console's numbers can be grouped. No log text, no account, no addresses.
+  Kept 90 days.
 
 If you choose *No thanks*, nothing is ever sent unless you use **Send
 diagnostic report** yourself. Change either one anytime under Settings >
-System (*Share problem reports*, *Share performance stats*).
+System (*Share problem reports*, *Share performance stats*); turning stats off
+also deletes the ones not sent yet.
 
 A report holds the logs of this run and the previous one, your
-`settings.json` (including a random install ID made on your console, not
-linked to your NVIDIA account), and the newest Luma crash dump from the last 3
-days. Public IP addresses are shortened to their first two numbers, and your
-login is never included. Reports are kept for 30 days and are only readable by
-the developer. The service's code is in
+`settings.json` (including the random install ID, which is not linked to your
+NVIDIA account), and the newest Luma crash dump of Kasumi from the last few
+days. Public IP addresses in the logs are shortened to their first two
+numbers, and your login is never included. Reports are kept for 30 days and
+are only readable by the developer. The service doesn't store your IP
+address: it only keeps a scrambled hourly counter to stop flooding, deleted
+after an hour. The service's code is in
 [`server/report-worker`](server/report-worker).
 
 ## Reporting problems

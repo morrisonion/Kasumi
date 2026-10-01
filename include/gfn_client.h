@@ -130,6 +130,8 @@ typedef struct {
     /* The session in the way answers 404 to this client: only NVIDIA can
      * close it now (made by an older Kasumi or another GeForce NOW app). */
     bool limit_unclosable;
+    /* The launch met NVIDIA's rate limit (429): the UI waits it out longer. */
+    bool limit_rate;
     /* Why the last launch or session failed, short and fixed ("limit",
      * "abandoned", "entitlement"...), for the launch stats. */
     char fail_code[16];

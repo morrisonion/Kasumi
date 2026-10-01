@@ -239,6 +239,16 @@ static void hydrate_session_identity(GfnClient *client)
     fetch_client_token(client);
 }
 
+/* The last token request failed for a passing reason (no answer, 408, 429,
+ * 5xx) rather than NVIDIA rejecting the credential. As in the other OpenNOW
+ * clients, only a rejection may end a saved login. */
+static bool g_token_transient;
+
+static bool token_status_transient(long status)
+{
+    return status == 408 || status == 429 || status >= 500;
+}
+
 static bool request_tokens(GfnClient *client, const char *form, bool polling)
 {
     const char *headers[] = {
@@ -248,9 +258,22 @@ static bool request_tokens(GfnClient *client, const char *form, bool polling)
         "Content-Type: application/x-www-form-urlencoded; charset=UTF-8"
     };
     HttpResponse response;
-    if (!http_request("POST", "https://login.nvidia.com/token", DEVICE_UA,
-                      headers, ARRAY_SIZE(headers), form, 128 * 1024, &response)) {
+    g_token_transient = false;
+    /* A refresh tries three times over two seconds; the sign-in poll has its
+     * own interval. */
+    const int attempts = polling ? 1 : 3;
+    bool sent = false;
+    for (int attempt = 1; attempt <= attempts; ++attempt) {
+        sent = http_request("POST", "https://login.nvidia.com/token", DEVICE_UA,
+                            headers, ARRAY_SIZE(headers), form, 128 * 1024, &response);
+        if ((sent && !token_status_transient(response.status)) || attempt == attempts) break;
+        if (sent) http_response_free(&response);
+        svcSleepThread(attempt == 1 ? 500000000LL : 1500000000LL);
+    }
+    if (!sent) {
+        g_token_transient = true;
         snprintf(client->status, sizeof(client->status), "Token request: %.130s", response.error);
+        diagnostic_log("AUTH", "token request got no answer: %.100s", response.error);
         return false;
     }
     json_error_t error;
@@ -288,10 +311,12 @@ static bool request_tokens(GfnClient *client, const char *form, bool polling)
         return true;
     }
 
-    const char *code = "";
+    const char *code = "", *description = "";
     if (root) {
         json_t *error_value = json_object_get(root, "error");
         if (json_is_string(error_value)) code = json_string_value(error_value);
+        json_t *description_value = json_object_get(root, "error_description");
+        if (json_is_string(description_value)) description = json_string_value(description_value);
     }
     if (polling && strcmp(code, "authorization_pending") == 0) {
         snprintf(client->status, sizeof(client->status), "Waiting for browser sign-in...");
@@ -299,11 +324,45 @@ static bool request_tokens(GfnClient *client, const char *form, bool polling)
         client->poll_interval += 5;
         snprintf(client->status, sizeof(client->status), "NVIDIA asked to slow polling");
     } else {
-        snprintf(client->status, sizeof(client->status), "Token HTTP %ld: %.80s", response.status, code);
-        client->auth_state = GFN_AUTH_ERROR;
+        /* Beta.22 report YVQ446: a partner login's refresh was refused and
+         * the log couldn't say why. */
+        diagnostic_log("AUTH", "token request failed: http=%ld error=%.40s (%.80s)",
+                       response.status, code, description);
+        g_token_transient = token_status_transient(response.status);
+        if (g_token_transient) {
+            snprintf(client->status, sizeof(client->status),
+                     "NVIDIA's login server is busy (HTTP %ld). Try again in a moment.", response.status);
+        } else {
+            snprintf(client->status, sizeof(client->status), "Token HTTP %ld: %.80s", response.status, code);
+            /* A refresh decides for itself (refresh_failed). */
+            if (polling) client->auth_state = GFN_AUTH_ERROR;
+        }
     }
     if (root) json_decref(root);
     http_response_free(&response);
+    return false;
+}
+
+/* A refresh that didn't work. The login stays while it lasts, and a passing
+ * failure (no Wi-Fi yet, a busy server) never signs anyone out: beta.18
+ * report J8E-HWH (Wi-Fi not back yet) and beta.22 report YVQ446 (refused,
+ * partner login) both sent players back to the sign-in code. */
+static bool refresh_failed(GfnClient *client, bool transient)
+{
+    const int64_t left = client->token_expires_at - (int64_t)time(NULL);
+    if (left > 60) {
+        diagnostic_log("AUTH", "refresh failed (%s); the current login lasts %lld s more",
+                       transient ? "temporary" : "refused", (long long)left);
+        return true;
+    }
+    if (transient) {
+        snprintf(client->status, sizeof(client->status),
+                 "Can't reach NVIDIA's login server right now. Check the Wi-Fi, then try again.");
+        return false;
+    }
+    diagnostic_log("AUTH", "refresh refused and the login has run out: sign-in needed");
+    client->auth_state = GFN_AUTH_ERROR;
+    snprintf(client->status, sizeof(client->status), "Your NVIDIA login has expired. Press X to sign in again.");
     return false;
 }
 
@@ -317,7 +376,9 @@ static bool refresh_session(GfnClient *client)
         }
         return true;
     }
+    bool transient = false;
     if (client->client_token[0] && client->user_id[0]) {
+        bool tried = false;
         char *encoded_token = http_url_encode(client->client_token);
         char *encoded_user = http_url_encode(client->user_id);
         if (encoded_token && encoded_user) {
@@ -330,6 +391,7 @@ static bool refresh_session(GfnClient *client)
                          encoded_token, DEVICE_CLIENT_ID, encoded_user);
                 diagnostic_log("AUTH", "refresh method=client-token");
                 const bool ok = request_tokens(client, form, false);
+                tried = true;
                 free(form);
                 free(encoded_token);
                 free(encoded_user);
@@ -342,31 +404,25 @@ static bool refresh_session(GfnClient *client)
             free(encoded_token);
             free(encoded_user);
         }
-        diagnostic_log("AUTH", "client-token refresh failed; trying OAuth refresh");
+        transient = !tried || g_token_transient;
+        diagnostic_log("AUTH", "client-token refresh failed (%s)%s", transient ? "temporary" : "refused",
+                       client->refresh_token[0] ? "; trying OAuth refresh" : "");
     }
-    if (!client->refresh_token[0]) {
-        client->auth_state = GFN_AUTH_ERROR;
-        snprintf(client->status, sizeof(client->status), "Login expired without refresh token; X to sign in again");
-        return false;
-    }
+    if (!client->refresh_token[0]) return refresh_failed(client, transient);
     char *encoded = http_url_encode(client->refresh_token);
-    if (!encoded) {
-        snprintf(client->status, sizeof(client->status), "Login refresh: not enough memory to encode token");
-        return false;
-    }
+    if (!encoded) return refresh_failed(client, true);
     const size_t length = strlen(encoded) + strlen(DEVICE_CLIENT_ID) + 96;
     char *form = malloc(length);
     if (!form) {
         free(encoded);
-        snprintf(client->status, sizeof(client->status), "Login refresh: not enough memory for request");
-        return false;
+        return refresh_failed(client, true);
     }
     snprintf(form, length, "grant_type=refresh_token&refresh_token=%s&client_id=%s", encoded, DEVICE_CLIENT_ID);
     free(encoded);
     diagnostic_log("AUTH", "refresh method=oauth-refresh-token");
     const bool ok = request_tokens(client, form, false);
     free(form);
-    return ok;
+    return ok || refresh_failed(client, transient || g_token_transient);
 }
 
 void gfn_client_init(GfnClient *client)
@@ -1321,10 +1377,20 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
                 snprintf(client->status, sizeof(client->status),
                          "This account has no %.20s access. For an NVIDIA account, pick NVIDIA in "
                          "Settings > Account and sign in again (code %d).", provider.name, status_code);
-            else
-                snprintf(client->status, sizeof(client->status),
-                         "This account can't stream here. If a local partner runs GeForce NOW in your country, "
-                         "pick it in Settings > Account and sign in again (code %d).", status_code);
+            else {
+                /* Where NVIDIA runs GeForce NOW itself (beta.22 report
+                 * DSZSUT, Spain) a partner is no answer: the account is. */
+                GfnProvider local;
+                providers_recommended(&local);
+                if (strcmp(local.code, PROVIDER_NVIDIA))
+                    snprintf(client->status, sizeof(client->status),
+                             "This account can't stream here. If %.20s sold you GeForce NOW, pick it in "
+                             "Settings > Account and sign in again (code %d).", local.name, status_code);
+                else
+                    snprintf(client->status, sizeof(client->status),
+                             "NVIDIA says this account can't stream. Check it plays at play.geforcenow.com "
+                             "(no VPN), then try again (code %d).", status_code);
+            }
         } else if (strstr(reason, "NO_CAPACITY") || strstr(reason, "CAPACITY")) {
             code = "capacity";
             snprintf(client->status, sizeof(client->status),
@@ -1842,6 +1908,7 @@ static void reset_launch_state(GfnClient *client)
     client->conflict_found = false;
     client->limit_wait = false;
     client->limit_unclosable = false;
+    client->limit_rate = false;
     client->fail_code[0] = '\0';
     client->ads_required = false;
     client->ads_answered = client->ads_pending_count = 0;
@@ -1862,6 +1929,8 @@ bool gfn_start_session(GfnClient *client, const GfnGame *game)
 {
     const bool quiet = client->limit_quiet;
     client->limit_quiet = false;
+    /* This attempt's answer only: launch_failed reads these. */
+    client->conflict_found = client->limit_wait = client->limit_rate = false;
     if (!game) {
         snprintf(client->status, sizeof(client->status), "No game selected; X searches, Y loads library");
         return false;
@@ -1870,7 +1939,11 @@ bool gfn_start_session(GfnClient *client, const GfnGame *game)
         snprintf(client->status, sizeof(client->status), "Not signed in; press X to sign in again");
         return false;
     }
-    if (!refresh_session(client)) return false;
+    if (!refresh_session(client)) {
+        /* A timed retry keeps waiting through a moment without Wi-Fi. */
+        client->limit_wait = quiet && gfn_has_session(client);
+        return false;
+    }
     if (gfn_session_active(client)) {
         snprintf(client->status, sizeof(client->status), "Session already active; B stops it");
         return false;
@@ -1894,6 +1967,7 @@ bool gfn_start_session(GfnClient *client, const GfnGame *game)
                  "NVIDIA is limiting launch attempts. Try again in %lld s.", (long long)(g_launch_blocked_until - now));
         snprintf(client->fail_code, sizeof(client->fail_code), "429");
         client->session_state = GFN_SESSION_ERROR;
+        client->limit_wait = client->limit_rate = true;
         free(body);
         return false;
     }
@@ -1925,6 +1999,7 @@ bool gfn_start_session(GfnClient *client, const GfnGame *game)
         snprintf(client->status, sizeof(client->status), "Session create network: %.120s", response.error);
         snprintf(client->fail_code, sizeof(client->fail_code), "network");
         client->session_state = GFN_SESSION_ERROR;
+        client->limit_wait = quiet;
         return false;
     }
     if (response.status == 429) {
@@ -1933,6 +2008,9 @@ bool gfn_start_session(GfnClient *client, const GfnGame *game)
                  "NVIDIA is limiting launch attempts for a moment. Try again in a minute.");
         snprintf(client->fail_code, sizeof(client->fail_code), "429");
         client->session_state = GFN_SESSION_ERROR;
+        /* The UI waits and tries again by itself: in beta.22 a 429 ended the
+         * slot wait with an error (4 launches). */
+        client->limit_wait = client->limit_rate = true;
         http_response_free(&response);
         return false;
     }

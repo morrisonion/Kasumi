@@ -194,6 +194,8 @@ typedef struct {
     bool conflict_same_game;
     /* The session in the way can't be closed from here (see gfn_client.h). */
     bool limit_unclosable;
+    /* The wait is NVIDIA's rate limit (429), not a busy slot. */
+    bool limit_rate;
     /* Weak / hotspot switched on for this session because the last one on
      * this network was choppy. */
     bool auto_weak;

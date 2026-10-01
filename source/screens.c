@@ -510,8 +510,8 @@ static const char *setting_description(const App *app, int setting)
             : "Kasumi never sends anything on its own. Turn on to send the log automatically when something goes wrong, which helps fix bugs faster.";
     case SETTING_SHARE_STATS:
         return s->share_stats
-            ? "After each session, Kasumi sends a few numbers: ping, bitrate, smoothness, lost frames, decode time. No log text, no addresses, no account."
-            : "Turn on to send a few anonymous numbers (ping, smoothness, lost frames) after each session. It shows what to improve for real players.";
+            ? "After each launch and session, Kasumi sends a few numbers: did the game start, queue time, ping, smoothness, lost frames. No log text, no addresses, no account."
+            : "Turn on to send a few numbers after each launch and session (did the game start, ping, smoothness). It shows what to improve for real players.";
     case SETTING_REPORT:
         return "Having a problem? Send this run's and the last run's log to Kasumi's developer and get a code to share. Only when you choose; nothing is sent otherwise.";
     case SETTING_UPDATES:
