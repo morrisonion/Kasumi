@@ -1550,10 +1550,20 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
          * it were still starting, until the player left. */
         client->session_state = GFN_SESSION_ERROR;
         snprintf(client->fail_code, sizeof(client->fail_code), "ended");
+        /* Beta.26 reports (9WFFRT, QYHU2H): players who quit from the game's
+         * own menu landed here, with a message blaming idling or another
+         * device. NVIDIA's reason is in session.errorCode; log it and say
+         * only what we know. */
+        char reason[24];
+        flexible_json_text(reason, sizeof(reason), json_object_get(session, "errorCode"));
+        json_t *end_desc = json_is_object(request_status) ? json_object_get(request_status, "statusDescription") : NULL;
+        json_t *end_unified = json_is_object(request_status) ? json_object_get(request_status, "unifiedErrorCode") : NULL;
         snprintf(client->status, sizeof(client->status),
-                 "NVIDIA closed this session (after a while without input, or from another device). "
-                 "Press A to start the game again.");
-        diagnostic_log("CLOUDMATCH", "%s: session over (status %d)", operation, client->session_status);
+                 "The game session has ended. Press A to start it again, or B to go back.");
+        diagnostic_log("CLOUDMATCH", "%s: session over (status %d) errorCode=%s desc=%.60s unified=%lld",
+                       operation, client->session_status, reason[0] ? reason : "-",
+                       json_is_string(end_desc) ? json_string_value(end_desc) : "-",
+                       json_is_integer(end_unified) ? (long long)json_integer_value(end_unified) : -1);
         json_decref(root);
         return false;
     } else if (client->queue_position > 0 ||

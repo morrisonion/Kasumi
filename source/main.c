@@ -686,6 +686,7 @@ static void change_setting(int direction)
         g_app.guide_page = 0;
         return;
     }
+    if (index == SETTING_COMMUNITY) return; /* the QR code on the bottom screen is the whole row */
     if (index == SETTING_SHARE_STATS) {
         screens_setting_change(&g_app, index, direction);
         if (!g_app.settings.share_stats) { remove(REPORT_STATS_PENDING_PATH); remove(LAUNCH_PENDING_PATH); }
@@ -2026,6 +2027,16 @@ static void watch_session_errors(void)
         was_error = error;
         return;
     }
+    /* NVIDIA ending a stream that ran a while is usually the player quitting
+     * from the game's own menu (beta.26 reports 9WFFRT, QYHU2H): a normal
+     * end, not a failure to report. Short streams still report. */
+    if (error && !was_error && g_app.stream_started_at && g_client.session_state == GFN_SESSION_ERROR &&
+        !strcmp(g_client.fail_code, "ended") && osGetTime() - g_app.stream_started_at >= 2ull * 60 * 1000) {
+        diagnostic_log("APP", "session ended after %llus of play",
+                       (unsigned long long)((osGetTime() - g_app.stream_started_at) / 1000));
+        was_error = error;
+        return;
+    }
     if (error && !was_error) {
         diagnostic_log("APP", "session failed: %.120s", g_client.session_state == GFN_SESSION_ERROR ? g_client.status : g_signal.status);
         queue_auto_report(g_app.stream_started_at ? "session-error" : "queue-or-setup-failed");
@@ -2211,7 +2222,7 @@ static void finish_jobs(void)
         if (result.ok) {
             snprintf(g_app.report_code, sizeof(g_app.report_code), "%s", report_code());
             open_modal(MODAL_REPORT_SENT, "送信完了", "REPORT SENT",
-                       "Share this code in your GitHub issue or message so the developer can find your report.");
+                       "Share this code on GitHub or in the Kasumi Discord so the developer can find your report.");
         } else {
             char text[96];
             snprintf(text, sizeof(text), "Report not sent: %.70s", report_error());

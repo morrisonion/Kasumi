@@ -70,11 +70,12 @@ GFX_SYMBOLS(seal)
 GFX_SYMBOLS(seal40)
 GFX_SYMBOLS(seal16)
 GFX_SYMBOLS(lantern)
+GFX_SYMBOLS(discord)
 #define GFX_ENTRY(name) { _binary_##name##_t3x_start, _binary_##name##_t3x_end }
 
 static const struct { const unsigned char *start, *end; } GFX_DATA[UI_IMAGE_COUNT] = {
     GFX_ENTRY(hero), GFX_ENTRY(mist), GFX_ENTRY(enso), GFX_ENTRY(seal), GFX_ENTRY(seal40),
-    GFX_ENTRY(seal16), GFX_ENTRY(lantern)
+    GFX_ENTRY(seal16), GFX_ENTRY(lantern), GFX_ENTRY(discord)
 };
 static C2D_SpriteSheet g_sheets[UI_IMAGE_COUNT];
 

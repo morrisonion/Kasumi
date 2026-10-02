@@ -12,12 +12,14 @@
   <a href="https://github.com/p0mpurin/Kasumi/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/p0mpurin/Kasumi/total?color=7EBEA5&style=flat-square"></a>
   <img alt="Platform" src="https://img.shields.io/badge/platform-New%203DS%20%7C%20New%202DS%20XL-7EBEA5?style=flat-square">
   <a href="LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-7EBEA5?style=flat-square"></a>
+  <a href="https://discord.gg/K9Jy3t7YHE"><img alt="Discord" src="https://img.shields.io/badge/discord-join%20the%20chat-7EBEA5?style=flat-square&logo=discord&logoColor=white"></a>
 </p>
 
 <p align="center">
   <a href="https://github.com/p0mpurin/Kasumi/releases"><b>Download</b></a> ·
   <a href="#getting-started">Getting started</a> ·
   <a href="#faq">FAQ</a> ·
+  <a href="https://discord.gg/K9Jy3t7YHE">Discord</a> ·
   <a href="https://github.com/p0mpurin/Kasumi/issues/new/choose">Report a problem</a>
 </p>
 
@@ -351,13 +353,24 @@ after an hour. The service's code is in
 The easiest way: in Kasumi, open **Settings > System > Send diagnostic
 report**, then mention the code it shows (like `K7F-2QX`) in your
 [bug report](https://github.com/p0mpurin/Kasumi/issues/new?template=bug_report.yml)
-or message. Kasumi keeps the log of the previous run too, so this works even
-after a crash or freeze.
+or in the [Discord](https://discord.gg/K9Jy3t7YHE). Kasumi keeps the log of the
+previous run too, so this works even after a crash or freeze.
 
 You can also attach the files yourself: `sdmc:/3ds/kasumi/kasumi-diagnostic.txt`
 (this run) and `kasumi-diagnostic-previous.txt` (the run before), plus, after a
 crash, the newest Luma dump from `sdmc:/luma/dumps/arm11/`. Ideas are welcome
 as [feature requests](https://github.com/p0mpurin/Kasumi/issues/new?template=feature_request.yml).
+
+## Community
+
+<p align="center">
+  <a href="https://discord.gg/K9Jy3t7YHE"><img src="docs/assets/discord-qr.png" width="150" alt="QR code for the Kasumi Discord"></a><br>
+  <b><a href="https://discord.gg/K9Jy3t7YHE">Join the Kasumi Discord</a></b><br>
+  <sub>Chat with other players, get setup help, share reports and hear about new versions first.</sub>
+</p>
+
+The same code is in Kasumi under **Settings > System > Kasumi Discord**: scan it
+with your phone straight from the 3DS.
 
 ## Building
 

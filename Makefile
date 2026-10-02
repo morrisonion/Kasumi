@@ -24,7 +24,7 @@ APP_AUTHOR := p0mpurin
 VERSION_MAJOR := 0
 VERSION_MINOR := 9
 VERSION_MICRO := 0
-VERSION_SUFFIX := -beta.26
+VERSION_SUFFIX := -beta.27
 VERSION := $(VERSION_MAJOR).$(VERSION_MINOR).$(VERSION_MICRO)$(VERSION_SUFFIX)
 APP_PRODUCT_CODE := CTR-P-KSMI
 APP_UNIQUE_ID := 0x4B534
@@ -84,6 +84,7 @@ $(CACERT_OBJECT): romfs/cacert.pem | $(BUILD)
 		--rename-section .data=.rodata.cacert,alloc,load,readonly,data,contents "$<" "$@"
 
 GFX_FORMAT_hero := rgb565
+GFX_FORMAT_discord := rgb565
 
 $(BUILD)/%.t3x: gfx/%.png | $(BUILD)
 	@$(DEVKITPRO)/tools/bin/tex3ds -f $(or $(GFX_FORMAT_$*),rgba8) -z auto -o "$@" "$<" > /dev/null

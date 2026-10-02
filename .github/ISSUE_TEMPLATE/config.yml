@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Kasumi Discord
+    url: https://discord.gg/K9Jy3t7YHE
+    about: Questions, setup help and chat with other players. Bugs are still best reported here.
   - name: Setup help (custom firmware and FBI)
     url: https://3ds.hacks.guide/
     about: Kasumi needs Luma3DS custom firmware. The guide covers installing it and FBI.

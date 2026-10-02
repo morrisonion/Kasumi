@@ -207,6 +207,7 @@ static const SettingEntry SETTING_ENTRIES[] = {
     { SETTING_SHARE, NULL, NULL },
     { SETTING_SHARE_STATS, NULL, NULL },
     { SETTING_REPORT, NULL, NULL },
+    { SETTING_COMMUNITY, NULL, NULL },
     { -1, "更新", "UPDATES" },
     { SETTING_UPDATES, NULL, NULL },
     { SETTING_AUTO_UPDATE, NULL, NULL },
@@ -239,7 +240,7 @@ static const char *const SETTING_LABELS[SETTING_COUNT] = {
     [SETTING_CONNECTION] = "Connection check", [SETTING_GUIDE] = "Getting started",
     [SETTING_NETWORK] = "Connection type", [SETTING_SERVER] = "Server",
     [SETTING_REPORT] = "Send diagnostic report", [SETTING_SHARE] = "Share problem reports",
-    [SETTING_SHARE_STATS] = "Share performance stats",
+    [SETTING_SHARE_STATS] = "Share performance stats", [SETTING_COMMUNITY] = "Kasumi Discord",
     [SETTING_UPDATES] = "Software update", [SETTING_AUTO_UPDATE] = "Check automatically",
     [SETTING_UPDATE_CHANNEL] = "Update channel", [SETTING_PROVIDER] = "GeForce NOW provider",
 };
@@ -255,6 +256,7 @@ static const char *const SETTING_JP[SETTING_COUNT] = {
     [SETTING_CONNECTION] = "接続", [SETTING_GUIDE] = "案内",
     [SETTING_NETWORK] = "回線", [SETTING_SERVER] = "サーバー",
     [SETTING_REPORT] = "報告", [SETTING_SHARE] = "協力", [SETTING_SHARE_STATS] = "統計",
+    [SETTING_COMMUNITY] = "仲間",
     [SETTING_UPDATES] = "更新", [SETTING_AUTO_UPDATE] = "自動確認",
     [SETTING_UPDATE_CHANNEL] = "チャンネル", [SETTING_PROVIDER] = "提供元",
 };
@@ -409,6 +411,7 @@ static const char *setting_value(const App *app, int setting)
         return text;
     }
     case SETTING_GUIDE: return "Open";
+    case SETTING_COMMUNITY: return "Scan";
     case SETTING_REPORT: return report_available() ? "Send" : "Unavailable";
     case SETTING_SHARE: return s->share_reports == SHARE_YES ? "On" : "Off";
     case SETTING_SHARE_STATS: return s->share_stats ? "On" : "Off";
@@ -514,6 +517,8 @@ static const char *setting_description(const App *app, int setting)
         return s->share_stats
             ? "After each launch and session, Kasumi sends a few numbers: did the game start, queue time, ping, smoothness, lost frames. No log text, no addresses, no account."
             : "Turn on to send a few numbers after each launch and session (did the game start, ping, smoothness). It shows what to improve for real players.";
+    case SETTING_COMMUNITY:
+        return "Chat with other players, get help and hear about new versions first. Scan with your phone, or visit discord.gg/K9Jy3t7YHE";
     case SETTING_REPORT:
         return "Having a problem? Send this run's and the last run's log to Kasumi's developer and get a code to share. Only when you choose; nothing is sent otherwise.";
     case SETTING_UPDATES:
@@ -943,6 +948,19 @@ static void draw_session_top(const App *app)
     static const char *const jp[] = { "待機中", "準備中", "接続中", "開始" };
     static const char *const en[] = { "IN QUEUE", "PREPARING RIG", "CONNECTING", "STARTING STREAM" };
 
+    if (failed && !reconnecting && client->session_state == GFN_SESSION_ERROR &&
+        !strcmp(client->fail_code, "ended")) {
+        /* A normal end (often the player quitting in-game), not an error. */
+        ui_enso(200, 84, 34, UI_ACCENT);
+        ui_text(200, 70, 26, UI_TEXT, UI_ALIGN_CENTER, "終");
+        draw_title(200, 126, "終了", "SESSION ENDED");
+        ui_text_fit(200, 156, 13, UI_TEXT_DIM, UI_ALIGN_CENTER, 360,
+                    app->game_title[0] ? app->game_title : "GeForce NOW");
+        ui_text_wrap(200, 172, 11, UI_TEXT_FAINT, UI_ALIGN_CENTER, 340, 2, 14, client->status);
+        static const char *const ended_hints[] = { "A", "Play again", "B", "Leave", NULL };
+        draw_footer(UI_TOP_WIDTH, ended_hints);
+        return;
+    }
     if (failed && !reconnecting) {
         ui_ring(200, 86, 34, 2.0f, UI_DANGER, UI_BG);
         ui_text(200, 68, 32, UI_DANGER, UI_ALIGN_CENTER, "!");
@@ -1915,7 +1933,9 @@ static void draw_settings_bottom(const App *app)
             }
         }
         if (setting == SETTING_BITRATE) draw_bitrate_preview(app);
-        ui_text(160, value_y, setting == SETTING_GYRO || setting == SETTING_BITRATE ? 16 : 22,
+        /* The QR art carries its own white margin, so it scans on every theme. */
+        if (setting == SETTING_COMMUNITY) ui_image(UI_IMAGE_DISCORD, 108, 79, 1.0f, 1.0f);
+        else ui_text(160, value_y, setting == SETTING_GYRO || setting == SETTING_BITRATE ? 16 : 22,
                 account ? UI_DANGER : UI_TEXT, UI_ALIGN_CENTER, setting_value(app, setting));
         unsigned count = 0;
         const unsigned option = setting_option(app, setting, &count);
@@ -1924,8 +1944,9 @@ static void draw_settings_bottom(const App *app)
                     UI_ACCENT, UI_LINE_STRONG);
     }
 
-    draw_arrow(SET_PREV, -1, !account, pressed(app, SET_PREV));
-    draw_arrow(SET_NEXT, 1, !account, pressed(app, SET_NEXT));
+    const bool arrows = !account && setting != SETTING_COMMUNITY;
+    draw_arrow(SET_PREV, -1, arrows, pressed(app, SET_PREV));
+    draw_arrow(SET_NEXT, 1, arrows, pressed(app, SET_NEXT));
     const bool sign_out = account && gfn_has_session(app->client);
     ui_button(SET_BACK, sign_out ? "SIGN OUT" : "BACK", sign_out ? "サインアウト" : "戻る",
               sign_out ? UI_BUTTON_DANGER : UI_BUTTON_NORMAL, pressed(app, SET_BACK));

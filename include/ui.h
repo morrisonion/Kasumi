@@ -53,6 +53,7 @@ typedef enum {
     UI_IMAGE_SEAL_40,
     UI_IMAGE_SEAL_16,
     UI_IMAGE_LANTERN,
+    UI_IMAGE_DISCORD,
     UI_IMAGE_COUNT
 } UiImage;
 
