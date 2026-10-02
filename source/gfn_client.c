@@ -225,8 +225,9 @@ static bool fetch_client_token(GfnClient *client)
         client->client_token_expires_at = now +
             (json_is_integer(expires) ? json_integer_value(expires) : 86400);
     }
-    diagnostic_log("AUTH", "client-token http=%ld token=%s", response.status,
-                   client->client_token[0] ? "present" : "missing");
+    diagnostic_log("AUTH", "client-token http=%ld token=%s lasts=%llds", response.status,
+                   client->client_token[0] ? "present" : "missing",
+                   (long long)(client->client_token_expires_at - now));
     if (root) json_decref(root);
     http_response_free(&response);
     return client->client_token[0] != '\0';
@@ -297,7 +298,13 @@ static bool request_tokens(GfnClient *client, const char *form, bool polling)
         const int64_t lifetime =
             (json_is_integer(expires) ? json_integer_value(expires) : 86400);
         client->token_expires_at = now + lifetime;
-        if (rotated_client_token) client->client_token_expires_at = now + lifetime;
+        /* A client token handed back here gets its real lifetime from
+         * /client_token below (as OpenNOW Vita). Beta.23 gave it the access
+         * token's hour, so it was never renewed in time and NVIDIA refused
+         * the next renewal with 401: twelve sign-outs in a day. */
+        if (rotated_client_token) client->client_token_expires_at = 0;
+        diagnostic_log("AUTH", "tokens renewed: login lasts %llds, client token %s",
+                       (long long)lifetime, rotated_client_token ? "replaced" : "kept");
         json_decref(root);
         http_response_free(&response);
         client->auth_state = GFN_AUTH_LOGGED_IN;
@@ -1365,10 +1372,19 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
         /* NVIDIA's reasons, in words a player can act on. */
         const char *code = "http";
         if (strstr(reason, "LIMITED_MODE")) {
+            /* Passes by itself: beta.23 consoles refused this way played
+             * minutes later. */
             code = "limited";
             snprintf(client->status, sizeof(client->status),
-                     "NVIDIA has this account in limited mode, so it can't start games right now. "
-                     "Check that it plays on play.geforcenow.com (code %d).", status_code);
+                     "NVIDIA is limiting new sessions right now (limited mode). It usually passes in a few "
+                     "minutes; try again soon (code %d).", status_code);
+        } else if (strstr(reason, "REGION_NOT_SUPPORTED")) {
+            code = "region";
+            char region[40];
+            regions_last_used(region, sizeof(region));
+            snprintf(client->status, sizeof(client->status),
+                     "The %.30s server isn't open to this account. Use Server: Auto in Settings > Network "
+                     "(code %d).", region[0] ? region : "chosen", status_code);
         } else if (strstr(reason, "ENTITLEMENT")) {
             code = "entitlement";
             GfnProvider provider;
@@ -2023,7 +2039,14 @@ bool gfn_start_session(GfnClient *client, const GfnGame *game)
          * A fresh session device id gets a free slot; at most every 10 min. */
         static int64_t rotated_at;
         const int64_t now_s = (int64_t)time(NULL);
-        if (per_device && !named && !listed && (!rotated_at || now_s - rotated_at >= 600)) {
+        /* Beta.22-23 reports: refusals fell from 78% to 26% of launches
+         * after a console got a new id, so swap every 3 min, not 10. */
+        if (per_device && !named && !listed && quiet && (!rotated_at || now_s - rotated_at >= 180)) {
+            rotated_at = now_s;
+            char fresh[40];
+            new_session_device_id(fresh);
+            diagnostic_log("CLOUDMATCH", "per-device limit during the wait: new session device id for the next try");
+        } else if (per_device && !named && !listed && (!rotated_at || now_s - rotated_at >= 180)) {
             rotated_at = now_s;
             char fresh[40];
             new_session_device_id(fresh);
@@ -2164,7 +2187,24 @@ bool gfn_recover_session(GfnClient *client, const GfnGame *game)
         client->session_state = GFN_SESSION_ERROR;
         return false;
     }
+    /* NVIDIA may move the session's signalling after a drop: beta.23
+     * reconnects kept the first address and got HTTP 503 every time. Read it
+     * afresh, and keep the old one only if the answer has none. */
+    char old_signaling[sizeof(client->signaling_url)], old_media[sizeof(client->media_ip)];
+    const int old_port = client->media_port;
+    memcpy(old_signaling, client->signaling_url, sizeof(old_signaling));
+    memcpy(old_media, client->media_ip, sizeof(old_media));
+    memset(client->signaling_url, 0, sizeof(client->signaling_url));
+    memset(client->media_ip, 0, sizeof(client->media_ip));
+    client->media_port = 0;
     const bool applied = http >= 200 && http < 300 && apply_session_response(client, &response, "Recover");
+    if (!client->signaling_url[0]) {
+        memcpy(client->signaling_url, old_signaling, sizeof(old_signaling));
+        memcpy(client->media_ip, old_media, sizeof(old_media));
+        client->media_port = old_port;
+    } else if (strcmp(client->signaling_url, old_signaling)) {
+        diagnostic_log("CLOUDMATCH", "recover: signalling moved");
+    }
     http_response_free(&response);
     diagnostic_log("CLOUDMATCH", "recover: http=%ld status=%d paused=%d state=%d", http, client->session_status,
                    client->session_paused, client->session_state);

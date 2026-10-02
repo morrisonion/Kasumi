@@ -1387,6 +1387,23 @@ static bool wifi_connected(void)
     return connected;
 }
 
+/* Once per game, after 90 s: a ping or loss that Standard mode on this
+ * server can't carry (beta.23: 17 of 67 sessions averaged over 100 ms). */
+static void connection_hint(u64 now)
+{
+    static u64 hinted_for;
+    if (hinted_for == g_app.stream_started_at || !g_app.stream_started_at || g_perf.weak) return;
+    const u64 played = now - g_app.stream_started_at;
+    if (played < 90000 || !g_perf.ping_samples) return;
+    const unsigned ping = (unsigned)(g_perf.ping_sum / g_perf.ping_samples);
+    const unsigned lost_per_min = (unsigned)((u64)g_perf.lost * 60000u / played);
+    if (ping < 120 && lost_per_min < 6) return;
+    hinted_for = g_app.stream_started_at;
+    diagnostic_log("APP", "connection hint shown ping=%u lostPerMin=%u", ping, lost_per_min);
+    show_notice(ping >= 120 ? "High ping: try a closer Server, or Weak / hotspot (Settings > Network)"
+                            : "Choppy? Try Weak / hotspot in Settings > Network");
+}
+
 /* "Pause": with the lid shut the stream stays connected but the sound and
  * the controls are held; opening it shows a short "Welcome back" card. */
 static void track_lid_pause(bool paused)
@@ -1578,6 +1595,7 @@ static void track_session(void)
             g_history_open = true;
         }
         if (!playing_since) playing_since = now;
+        connection_hint(now);
         /* Ten clean seconds after a reconnect: the next drop starts afresh. */
         if (g_app.reconnect_attempt && now - playing_since >= 10000) g_app.reconnect_attempt = 0;
         if (g_app.recover_tried && now - playing_since >= 10000) g_app.recover_tried = false;
@@ -1600,8 +1618,12 @@ static void track_session(void)
      * media instead of sending the player back to the library. */
     /* Video frozen for 12 s with nothing else wrong (no lid, Wi-Fi up): the
      * keyframe requests (every 3 s) have not helped, so reconnect. */
+    /* The video thread can stamp a frame after `now` was read: unsigned
+     * now - last then wrapped to 2^64 and every such reconnect in beta.23
+     * reports was bogus (one broke a working game). */
+    const u64 last_frame = g_transport.last_decoded_frame_at;
     const bool frozen = g_app.view == VIEW_STREAM && g_transport.state == WEBRTC_CONNECTED &&
-                        g_transport.last_decoded_frame_at && now - g_transport.last_decoded_frame_at > 12000 &&
+                        last_frame && now > last_frame && now - last_frame > 12000 &&
                         !g_app.lid_paused && !g_resumed_at && wifi_connected();
     if (frozen && !net_worker_busy() && g_client.session_state == GFN_SESSION_READY && g_app.reconnect_attempt < 3) {
         diagnostic_log("APP", "video frozen for %llu ms; reconnecting",
@@ -1973,6 +1995,17 @@ static void watch_session_errors(void)
                        (g_client.session_state == GFN_SESSION_ERROR ||
                         (g_signal.state == NVST_SIGNAL_ERROR && !g_app.stream_started_at &&
                          g_app.setup_retries >= SETUP_RETRIES));
+    /* A free session ending around its hour: NVIDIA says "internal error",
+     * but it is the free tier's limit (beta.23 report K9J4FF, 63 min). */
+    if (error && !was_error && g_app.free_tier_guess && g_app.stream_started_at &&
+        osGetTime() - g_app.stream_started_at >= 58ull * 60 * 1000) {
+        diagnostic_log("APP", "free session ended after its hour (%.80s)", g_client.status);
+        snprintf(g_client.status, sizeof(g_client.status),
+                 "Your free hour is over. Press A to start the game again (you may queue again).");
+        perf_note_error("free-hour");
+        was_error = error;
+        return;
+    }
     if (error && !was_error) {
         diagnostic_log("APP", "session failed: %.120s", g_client.session_state == GFN_SESSION_ERROR ? g_client.status : g_signal.status);
         queue_auto_report(g_app.stream_started_at ? "session-error" : "queue-or-setup-failed");
@@ -2026,9 +2059,11 @@ static void limit_wait_text(void)
                  "close it now. Retrying in %u:%02u; B stops, try later.", left / 60, left % 60);
         return;
     }
+    /* Beta.23: every one of 27 waits in a day's reports was cancelled; the
+     * ones left alone got in. */
     snprintf(g_app.modal_text, sizeof(g_app.modal_text),
-             "NVIDIA is still closing your other session. Trying again in %u:%02u (up to 15 min). "
-             "Closing GeForce NOW on other devices helps.", left / 60, left % 60);
+             "NVIDIA limits how often one console can start games (free accounts most). It usually "
+             "clears in 2-5 min and Kasumi keeps trying: next try in %u:%02u.", left / 60, left % 60);
 }
 
 /* A launch failed: ask about a session in the way, wait for NVIDIA to free
@@ -2078,8 +2113,21 @@ static void launch_failed(void)
         launch_end(g_app.limit_rate ? "429" : "limit", launch_share_id());
         return;
     }
+    /* Beta.23: one console asked for Japan from Australia 18 times. */
+    if (!strcmp(g_client.fail_code, "region") && g_app.settings.server[0] &&
+        strcmp(g_app.settings.server, REGION_CHOICE_NVIDIA)) {
+        static char text[96];
+        diagnostic_log("APP", "server %s refused for this account: switching to Auto", g_app.settings.server);
+        snprintf(text, sizeof(text), "%.30s isn't open to your account - Server is now Auto", g_app.settings.server);
+        g_app.settings.server[0] = '\0';
+        regions_set_choice("");
+        save_settings();
+        show_notice(text);
+        submit_job(NET_JOB_START_SESSION, "Trying again on Auto...", NULL, &g_current_game);
+        return;
+    }
     open_modal(MODAL_ERROR, "起動失敗", "LAUNCH FAILED", g_client.status);
-    queue_auto_report("launch-failed");
+    if (strcmp(g_client.fail_code, "limited")) queue_auto_report("launch-failed");
     launch_end(g_client.fail_code[0] ? g_client.fail_code : "error", launch_share_id());
 }
 
@@ -2355,8 +2403,11 @@ int main(int argc, char **argv)
         } else if (g_app.update_open && g_app.view != VIEW_STREAM && !g_app.busy) {
             handle_updates(down, repeat, action);
         } else if (g_app.busy) {
-            /* The UI stays live during requests; B cancels what can be cancelled. */
-            if (down & KEY_B) net_worker_cancel();
+            /* The UI stays live during requests; B cancels what can be
+             * cancelled, but never the request that ends the session on
+             * NVIDIA's side (beta.23: players pressing B while leaving got
+             * "Session stop network: Cancelled", and the game stayed open). */
+            if ((down & KEY_B) && net_worker_current_job() != NET_JOB_STOP_SESSION) net_worker_cancel();
         } else if (g_app.modal != MODAL_NONE) {
             handle_modal(down, action);
         } else {
@@ -2405,8 +2456,11 @@ int main(int argc, char **argv)
         watch_session_errors();
         launch_track(&g_client);
         limit_wait_tick();
-        g_app.video_stalled = g_app.view == VIEW_STREAM && g_transport.last_decoded_frame_at &&
-                              osGetTime() - g_transport.last_decoded_frame_at > 1500;
+        {
+            const u64 last_frame = g_transport.last_decoded_frame_at, at = osGetTime();
+            g_app.video_stalled = g_app.view == VIEW_STREAM && last_frame && at > last_frame &&
+                                  at - last_frame > 1500;
+        }
         /* While video owns the top screen, redraw the lower screen only when
          * something on it can have changed. */
         const u64 now = osGetTime();
