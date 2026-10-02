@@ -15,6 +15,9 @@ typedef enum {
     STREAM_BITRATE_STEADY_1000,
     STREAM_BITRATE_STEADY_1200,
     STREAM_BITRATE_STEADY_1500,
+    /* Sharp: ~1.8-2 Mbps (floor 1.8) for strong Wi-Fi. The name is kept
+     * from its beta.25 test; saved settings store its index. */
+    STREAM_BITRATE_SHARP_TEST,
     STREAM_BITRATE_COUNT
 } StreamBitrateMode;
 
@@ -28,6 +31,10 @@ unsigned stream_profile_min_bitrate(void);
 unsigned stream_profile_max_bitrate(void);
 /* NVIDIA vqos.dynamicStreamingMode: 3 adapts aggressively, 0 holds rate. */
 unsigned stream_profile_dynamic_mode(void);
+unsigned stream_profile_pacing_groups(void);
+/* Sharp is running: its sessions don't mark a network as choppy. */
+bool stream_profile_test_mode(void);
+unsigned stream_profile_pacing_delay_us(void);
 /* Developer resolution probe: request WxH and only log the SPS NVIDIA sends
  * (no decoding, so it also runs in an emulator without MVD). */
 void stream_profile_set_override(unsigned width, unsigned height);

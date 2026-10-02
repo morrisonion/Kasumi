@@ -64,6 +64,12 @@ void agent_destroy(Agent* agent) {
 #endif
 }
 
+#if defined(__3DS__)
+#include <3ds.h>
+#endif
+unsigned agent_select_calls;
+uint64_t agent_select_us_total, agent_select_us_max;
+
 static int agent_socket_recv(Agent* agent, Address* addr, uint8_t* buf, int len, int timeout_ms) {
   int ret = -1;
   int i = 0;
@@ -89,7 +95,19 @@ static int agent_socket_recv(Agent* agent, Address* addr, uint8_t* buf, int len,
     }
   }
 
+#if defined(__3DS__)
+  const uint64_t select_start = svcGetSystemTick();
+#endif
   ret = select(maxfd + 1, &rfds, NULL, NULL, &tv);
+#if defined(__3DS__)
+  {
+    /* Kasumi: what one select() costs on the 3DS socket service. */
+    const uint64_t us = (svcGetSystemTick() - select_start) / (SYSCLOCK_ARM11 / 1000000u);
+    agent_select_calls++;
+    agent_select_us_total += us;
+    if (us > agent_select_us_max) agent_select_us_max = us;
+  }
+#endif
   if (ret < 0) {
     LOGE("select error");
   } else if (ret == 0) {

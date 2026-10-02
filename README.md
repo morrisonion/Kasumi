@@ -54,7 +54,7 @@ back. It is not affiliated with NVIDIA or with the OpenNOW project.
     <td align="center" width="33%">
       <img src="docs/assets/feature-connection.png" width="160" alt=""><br>
       <b>Tuned for 3DS Wi-Fi</b><br>
-      Smooth frame pacing, loss recovery and a built-in connection check.
+      Uses both New 3DS CPU cores, smooth frame pacing and a built-in connection check.
     </td>
   </tr>
 </table>
@@ -176,6 +176,7 @@ click, D-Pad direction, or nothing. Only that game uses the mapping.
 
 - **Choppy picture?** Move closer to the router, or set Bitrate to
   *Steady 1 Mbps* (Settings, or just for one game in its Options).
+- **Want more detail?** On strong Wi-Fi (3 bars), set Bitrate to *Sharp*.
 - **Phone hotspot or far from the router?** Set Settings > Network >
   *Connection type* to **Weak / hotspot**: a steadier, slightly softer picture
   that copes with mobile data.
@@ -215,10 +216,12 @@ hour ends.
 No. Kasumi decodes video with the hardware decoder that only the "New"
 models have.
 
-**Why 30 FPS and around 1 Mbps?**
-The 3DS screen and decoder are built for 30 FPS video, and its 2.4 GHz Wi-Fi
-starts losing packets above roughly 1.2 Mbps. Kasumi is tuned for a smooth,
-steady picture within those limits.
+**Why 30 FPS, and which bitrate?**
+The 3DS screen and decoder are built for 30 FPS video. Kasumi streams about
+1.3 Mbps by default (*Adaptive*), about 1.8-2 Mbps with *Sharp* on strong
+Wi-Fi, and about 1 Mbps with *Steady 1 Mbps* for weak Wi-Fi or a phone
+hotspot. (Before 0.9.0-beta.25, a too-small network buffer lost packets above
+about 1 Mbps, so higher rates stuttered; that is fixed.)
 
 **How is the latency?**
 It depends mostly on your distance to NVIDIA's servers and on your Wi-Fi. In
@@ -389,7 +392,9 @@ Kasumi builds on the open-source OpenNOW family of GeForce NOW clients,
 especially [OpenNOW-Switch](https://github.com/OpenCloudGaming/OpenNOW-Switch)
 and OpenNOW-Vita, and on libpeer, libsrtp, usrsctp, mbedTLS, libcurl,
 jansson, libopus, stb_image, citro2d and libctru. MVD and zoom work was
-informed by [Moonlight-N3DS](https://github.com/zoeyjodon/moonlight-N3DS).
+informed by [Moonlight-N3DS](https://github.com/zoeyjodon/moonlight-N3DS), and its
+[moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c)
+3DS socket code showed how to get the largest receive buffer the 3DS allows.
 
 GeForce NOW and NVIDIA are trademarks of NVIDIA Corporation. Nintendo 3DS is
 a trademark of Nintendo. Kasumi is an unofficial fan project and is not

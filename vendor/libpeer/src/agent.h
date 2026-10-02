@@ -135,4 +135,8 @@ void agent_get_io_stats(Agent* agent, uint32_t* gather_sent, uint32_t* gather_re
                         uint32_t* checks_attempted, uint32_t* send_failures,
                         int* last_send_errno);
 
+/* Kasumi: select() timing on the media socket (3DS builds). */
+extern unsigned agent_select_calls;
+extern uint64_t agent_select_us_total, agent_select_us_max;
+
 #endif  // AGENT_H_

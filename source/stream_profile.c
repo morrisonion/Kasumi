@@ -21,7 +21,7 @@ const char *stream_profile_name(void)
 {
     static char name[40];
     static const char *const rates[STREAM_BITRATE_COUNT] = {
-        "adaptive", "1 Mbps", "1.2 Mbps", "1.5 Mbps"
+        "adaptive", "1 Mbps", "1.2 Mbps", "1.5 Mbps", "sharp"
     };
     snprintf(name, sizeof(name), "540p %s · %s", g_wide ? "wide" : "classic",
              g_weak ? "weak link" : rates[g_bitrate]);
@@ -58,20 +58,31 @@ static unsigned steady_rate(void)
     }
 }
 
-/* Adaptive used to allow 1.6-4 Mbps. Build 58 showed NVIDIA climbing to
+/* NVIDIA parks at the floor it is given (the 3DS sends no bandwidth
+ * feedback), so the floor is the rate. Until beta.25 every rate above ~1
+ * Mbps lost packets, which looked like the 3DS radio's limit: it was the
+ * media socket's receive buffer. The 3DS refuses 128 KiB and libpeer then
+ * kept the tiny default; stepping down to the 64 KiB it grants, a 1.8 Mbps
+ * floor ran 4.6 minutes with one resent packet. Adaptive now sits at ~1.3,
+ * Sharp at ~1.8-2. (Moonlight-N3DS receives 3 Mbps on the same hardware.)
+ * Adaptive used to allow 1.6-4 Mbps. Build 58 showed NVIDIA climbing to
  * ~1.4 Mbps and the 3DS radio losing ~1.5 packets/s there; build 64 at a
  * steady ~1.3 Mbps hit a loss burst. Adaptive starts at 1.2 and may move
  * within 1-1.8 Mbps. Steady modes hold a floor, like the official mode 0. */
 unsigned stream_profile_initial_bitrate(void)
 {
     if (g_weak) return 800;
-    return g_bitrate == STREAM_BITRATE_ADAPTIVE ? 1200 : steady_rate();
+    if (g_bitrate == STREAM_BITRATE_SHARP_TEST) return 2000;
+    return g_bitrate == STREAM_BITRATE_ADAPTIVE ? 1400 : steady_rate();
 }
 
 unsigned stream_profile_min_bitrate(void)
 {
     if (g_weak) return 600;
-    return g_bitrate == STREAM_BITRATE_ADAPTIVE ? 1000 : steady_rate();
+    /* NVIDIA parks at the floor without bandwidth feedback (beta.25 tests:
+     * a flat ~0.92 Mbps under Adaptive), so the test mode sets a high one. */
+    if (g_bitrate == STREAM_BITRATE_SHARP_TEST) return 1800;
+    return g_bitrate == STREAM_BITRATE_ADAPTIVE ? 1300 : steady_rate();
 }
 
 unsigned stream_profile_max_bitrate(void)
@@ -79,10 +90,18 @@ unsigned stream_profile_max_bitrate(void)
     /* Steady peaks stay close to the floor: keyframe bursts above the
      * average are what the 3DS radio loses first. */
     if (g_weak) return 1000;
+    if (g_bitrate == STREAM_BITRATE_SHARP_TEST) return 2500;
     return g_bitrate == STREAM_BITRATE_ADAPTIVE ? 1800 : steady_rate() + 250;
 }
 
+/* How NVIDIA spreads a frame's packets. Sharp spreads a frame over ~9 ms
+ * in more, smaller groups (beta.25: with the old buffer it cut frozen frames
+ * from 23 to 6 at ~1.6 Mbps); the other modes keep the proven 3 ms. */
+bool stream_profile_test_mode(void) { return g_bitrate == STREAM_BITRATE_SHARP_TEST; }
+unsigned stream_profile_pacing_groups(void) { return g_bitrate == STREAM_BITRATE_SHARP_TEST ? 16 : 10; }
+unsigned stream_profile_pacing_delay_us(void) { return g_bitrate == STREAM_BITRATE_SHARP_TEST ? 9000 : 3000; }
+
 unsigned stream_profile_dynamic_mode(void)
 {
-    return g_bitrate == STREAM_BITRATE_ADAPTIVE || g_weak ? 3 : 0;
+    return g_bitrate == STREAM_BITRATE_ADAPTIVE || g_bitrate == STREAM_BITRATE_SHARP_TEST || g_weak ? 3 : 0;
 }

@@ -13,6 +13,10 @@ typedef struct TcpSocket {
   Address bind_addr;
 } TcpSocket;
 
+/* Kasumi: the receive buffer the system granted on the last open (bytes),
+ * or negative when every size was refused (-(default)-1). */
+extern int udp_socket_rcvbuf_granted;
+
 int udp_socket_open(UdpSocket* udp_socket, int family, int port);
 
 int udp_socket_bind(UdpSocket* udp_socket, int port);

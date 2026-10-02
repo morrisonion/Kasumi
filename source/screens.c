@@ -366,7 +366,7 @@ static const char *setting_value(const App *app, int setting)
     case SETTING_RESOLUTION: return s->wide_video ? "Wide 800" : "Classic 400";
     case SETTING_BITRATE: {
         static const char *const names[STREAM_BITRATE_COUNT] = {
-            "Adaptive", "Steady 1 Mbps", "Steady 1.2 Mbps", "Steady 1.5 Mbps"
+            "Adaptive", "Steady 1 Mbps", "Steady 1.2 Mbps", "Steady 1.5 Mbps", "Sharp"
         };
         return names[s->bitrate_mode];
     }
@@ -466,10 +466,12 @@ static const char *setting_description(const App *app, int setting)
             : "The normal 400-column top screen. Use only if Wide misbehaves.";
     case SETTING_BITRATE:
         return s->bitrate_mode == STREAM_BITRATE_ADAPTIVE
-            ? "NVIDIA moves the rate between 1 and 1.8 Mbps and backs off when Wi-Fi loses packets. Next launch."
+            ? "About 1.3 Mbps: a clean, detailed picture on good home Wi-Fi. The default. Next launch."
+            : s->bitrate_mode == STREAM_BITRATE_SHARP_TEST
+            ? "About 1.8-2 Mbps: the sharpest picture. Needs strong Wi-Fi (3 bars, near the router). Next launch."
             : s->bitrate_mode == STREAM_BITRATE_STEADY_1000
-            ? "Smoothest: the rate 3DS Wi-Fi carries with almost no lost packets. Slightly softer picture. Next launch."
-            : "Sharper, but 3DS Wi-Fi starts losing packets here. If RESENT/S climbs, step down. Next launch.";
+            ? "About 1 Mbps: smoothest on weak Wi-Fi or a phone hotspot, a little softer. Next launch."
+            : "A fixed rate. If the stats show RESENT/S climbing, pick a lower one. Next launch.";
     case SETTING_FILTER:
         return s->sharpen
             ? "NVIDIA sharpens before encoding. Crisper edges, but at this bitrate it costs detail elsewhere. Next launch."
@@ -1227,12 +1229,16 @@ static void draw_details_top(const App *app)
 /* The per-game options sheet: rows of "setting  < value >". */
 static const char *option_value(const App *app, const GamePrefs *prefs, int row, char *buffer, size_t size)
 {
-    static const char *const bitrates[STREAM_BITRATE_COUNT] = { "Adaptive", "Steady 1", "Steady 1.2", "Steady 1.5" };
+    static const char *const bitrates[STREAM_BITRATE_COUNT] = { "Adaptive", "Steady 1", "Steady 1.2", "Steady 1.5", "Sharp" };
     static const char *const gyros[GFN_GYRO_MODE_COUNT] = { "Off", "Always", "While aiming" };
     static const char *const layouts[2] = { "Position", "Letters" };
     const GfnClient *c = app->client;
     switch (row) {
-    case OPTION_BITRATE: return prefs->bitrate < 0 ? "Default" : bitrates[prefs->bitrate % STREAM_BITRATE_COUNT];
+    case OPTION_BITRATE:
+        if (prefs->bitrate >= 0) return bitrates[prefs->bitrate % STREAM_BITRATE_COUNT];
+        /* Say what Default means, so a game's own choice is never a surprise. */
+        snprintf(buffer, size, "Default (%s)", bitrates[app->settings.bitrate_mode % STREAM_BITRATE_COUNT]);
+        return buffer;
     case OPTION_GYRO: return prefs->gyro < 0 ? "Default" : gyros[prefs->gyro % GFN_GYRO_MODE_COUNT];
     case OPTION_LAYOUT: return prefs->layout < 0 ? "Default" : layouts[prefs->layout % 2];
     case OPTION_MAPPING: return prefs->has_map ? "Custom  ·  A to edit" : "Default  ·  A to edit";
@@ -1253,7 +1259,10 @@ static const char *connection_advice(const GfnClient *c)
     const char *advice = c->conn_bars < 2 || c->conn_kbps < 2000
         ? "Weak link: set Connection type to Weak / hotspot."
         : c->conn_latency_ms > 150 ? "High latency: expect some input lag; Weak / hotspot may help."
-                                   : "Good connection: Standard should run smoothly.";
+        /* Sharp needs ~2 Mbps; the check's download speed has headroom here. */
+        : c->conn_bars >= 3 && c->conn_kbps >= 3500 && c->conn_latency_ms <= 100
+            ? "Strong connection: Bitrate Sharp should run cleanly for the most detail."
+            : "Good connection: Standard with Adaptive should run smoothly.";
     const int best = regions_fastest();
     Region region;
     if (best >= 0 && regions_get((unsigned)best, &region))
@@ -1626,8 +1635,8 @@ static const GuidePage GUIDE[GUIDE_PAGES] = {
       "the lower screen.",
       "Hold START + SELECT during play for the stream menu." },
     { "画", "画質", "PICTURE & WI-FI",
-      "Stay close to your router (3 bars). Adaptive bitrate is the default; choose Steady 1 Mbps if "
-      "the picture stutters. ZOOM crops the picture for small text.",
+      "Stay close to your router (3 bars). Adaptive is the default; Sharp gives more detail on strong "
+      "Wi-Fi, Steady 1 Mbps helps if the picture stutters. ZOOM crops for small text.",
       "Settings > System > Connection check tests your Wi-Fi." },
     { "遊", "機能", "EXTRAS",
       "Gyro aiming, screenshots, zoom zones, themes, favourites and options for each game. Open a "
@@ -1863,14 +1872,15 @@ static void draw_bitrate_preview(const App *app)
     ui_hline(x0, y, x1 - x0, UI_LINE_STRONG);
     ui_label(x0, y + 8, 11, UI_TEXT_FAINT, UI_ALIGN_LEFT, "SMOOTH");
     ui_label(x1, y + 8, 11, UI_TEXT_FAINT, UI_ALIGN_RIGHT, "SHARP");
-    static const float stops[STREAM_BITRATE_COUNT] = { 0.25f, 0.0f, 0.4f, 1.0f };
+    /* Positions by rate: 1 Mbps at the left, Sharp (~1.8-2) at the right. */
+    static const float stops[STREAM_BITRATE_COUNT] = { 0.4f, 0.0f, 0.25f, 0.6f, 1.0f };
     for (int i = 1; i < STREAM_BITRATE_COUNT; ++i)
         ui_circle(x0 + (x1 - x0) * stops[i], y, 2.0f, UI_LINE_STRONG);
     const float at = x0 + (x1 - x0) * stops[app->settings.bitrate_mode];
     ui_circle(at, y, 6.0f, UI_ACCENT);
     ui_circle(at, y, 2.5f, UI_BG);
     if (app->settings.bitrate_mode == STREAM_BITRATE_ADAPTIVE)
-        ui_rect(x0 + (x1 - x0) * 0.0f, y - 1, (x1 - x0) * 0.55f, 2, ui_with_alpha(UI_ACCENT, 0x70));
+        ui_rect(x0 + (x1 - x0) * 0.4f, y - 1, (x1 - x0) * 0.4f, 2, ui_with_alpha(UI_ACCENT, 0x70));
 }
 
 static void draw_settings_bottom(const App *app)

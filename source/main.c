@@ -181,6 +181,9 @@ static void render_wide_video(bool draw_bottom)
         const unsigned reserve_low = stream_profile_weak() ? 2 : 1;
         if (reserve < reserve_low) reserve = reserve_low;
         if (reserve > reserve_low && now_ms - last_repeat_at >= 60000) reserve = reserve_low;
+        /* The decoder can be rebuilt from core 2 (a new stream size):
+         * frames are only looked at under the transport lock. */
+        webrtc_transport_lock();
         unsigned ready = mvd_video_ready_frames();
         while (ready > reserve + 3) {
             mvd_video_skip_oldest_frame();
@@ -217,7 +220,12 @@ static void render_wide_video(bool draw_bottom)
                     if (b && b < best_bytes) { best_bytes = b; best = i; }
                 }
                 ++drop_wait;
-                const bool quiet = best && (float)best_bytes <= avg_bytes * 0.7f;
+                /* The bar relaxes as the wait goes on (0.7 -> 1.0 of the
+                 * average), so the drop still lands on a low-motion frame:
+                 * at ~1.6 Mbps only 2 of 21 drops found a frame under 0.7
+                 * and the rest were forced after 5 s (beta.25 test). */
+                const float bar = 0.7f + 0.3f * (float)(drop_wait < 150 ? drop_wait : 150) / 150.0f;
+                const bool quiet = best && (float)best_bytes <= avg_bytes * bar;
                 if (ready < reserve + 2) {
                     drop_wait = 0; /* the surplus went away on its own */
                 } else if (best && (quiet || drop_wait >= 150)) {
@@ -230,9 +238,11 @@ static void render_wide_video(bool draw_bottom)
                 backlog_streak = 0;
             }
         }
+        webrtc_transport_unlock();
     }
     if (!present && !draw_bottom) return;
     const u64 start = svcGetSystemTick();
+    webrtc_transport_lock();
     const void *frame = present ? mvd_video_take_gpu_frame() : NULL;
     if (frame && g_screenshot_requested) {
         g_screenshot_requested = false;
@@ -242,6 +252,7 @@ static void render_wide_video(bool draw_bottom)
         ui_video_upload(frame);
         mvd_video_release_gpu_frame();
     }
+    webrtc_transport_unlock();
     ui_frame_begin(false);
     if (frame) {
         ui_begin_top_video();
@@ -1028,6 +1039,16 @@ static void apply_game_options(const GamePrefs *prefs)
     if (prefs->layout >= 0 && prefs->layout < 2) session.button_layout = (GfnButtonLayout)prefs->layout;
     settings_apply_input(&session);
     settings_apply_picture(&session);
+    /* What this game really streams with (a beta.25 test logged Sharp, then
+     * the game's own Adaptive option replaced it). */
+    if (prefs->bitrate >= 0) {
+        diagnostic_log("VIDEO", "game profile=%s initial=%u min=%u max=%u", stream_profile_name(),
+                       stream_profile_initial_bitrate(), stream_profile_min_bitrate(),
+                       stream_profile_max_bitrate());
+        /* Beta.25 tests: a game's own Adaptive quietly replaced Settings. */
+        if ((StreamBitrateMode)prefs->bitrate != g_app.settings.bitrate_mode)
+            show_notice("This game uses its own Bitrate (game page, X > Options)");
+    }
     g_session_prefs = *prefs;
     if (prefs->has_map) gfn_input_set_custom_map(prefs->map);
 }
@@ -1334,9 +1355,11 @@ static void apt_hook(APT_HookType hook, void *param)
 {
     (void)param;
     if (hook == APTHOOK_ONSLEEP || hook == APTHOOK_ONSUSPEND) {
+        webrtc_transport_pause(true);
         g_suspended_at = osGetTime();
         g_suspend_was_sleep = hook == APTHOOK_ONSLEEP;
     } else if (hook == APTHOOK_ONWAKEUP || hook == APTHOOK_ONRESTORE) {
+        webrtc_transport_pause(false);
         g_resumed_at = osGetTime();
     }
 }
@@ -1535,7 +1558,10 @@ static void track_session(void)
             perf_end(g_app.settings.install_id);
             /* A Weak session Kasumi chose by itself counts for the network: when it
              * went smoothly, the next session there tries Standard again. */
-            net_memory_note(g_perf.weak && !g_app.auto_weak, g_perf.seconds, g_perf.lost, g_perf.repeated);
+            /* Not a Sharp (test) session: a stress test that loses packets on
+             * purpose put the next ordinary session into Weak (beta.25 test). */
+            if (!stream_profile_test_mode())
+                net_memory_note(g_perf.weak && !g_app.auto_weak, g_perf.seconds, g_perf.lost, g_perf.repeated);
             /* A clearly choppy session on Standard: point at Weak / hotspot
              * (beta.17 stats: one console lost ~5 frames a minute). */
             const unsigned minutes = g_perf.seconds / 60;
@@ -1871,14 +1897,8 @@ static void probe_tick(void)
 
 static void wait_for_media(int timeout_ms)
 {
-    const int fd = webrtc_transport_socket(&g_transport);
-    if (fd < 0) {
-        svcSleepThread((s64)timeout_ms * 1000000LL);
-        return;
-    }
-    struct pollfd media = { .fd = fd, .events = POLLIN, .revents = 0 };
-    if (poll(&media, 1, timeout_ms) > 0 && (media.revents & POLLIN))
-        g_transport.media_readable = true;
+    /* Packets on core 2 when it runs there, else the media socket. */
+    webrtc_transport_wait(&g_transport, timeout_ms);
 }
 
 static void tick_network(void)
@@ -2486,6 +2506,8 @@ int main(int argc, char **argv)
     if (g_perf.active) perf_end(g_app.settings.install_id);
     aptUnhook(&g_apt_cookie);
     queue_alert_exit();
+    /* The media core stops before the sound it feeds is closed. */
+    webrtc_transport_close(&g_transport);
     audio_output_close();
     audio_system_exit();
     if (gfn_session_active(&g_client)) {

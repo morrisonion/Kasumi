@@ -1522,6 +1522,18 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
     } else if (resuming) {
         client->session_state = GFN_SESSION_SETUP;
         snprintf(client->status, sizeof(client->status), "Resuming your game...");
+    } else if (client->session_status >= 7) {
+        /* Over (OpenNOW desktop: 7+ is "no longer resumable"). Beta.25 test:
+         * an idle game came back as status 7 and Kasumi waited on it as if
+         * it were still starting, until the player left. */
+        client->session_state = GFN_SESSION_ERROR;
+        snprintf(client->fail_code, sizeof(client->fail_code), "ended");
+        snprintf(client->status, sizeof(client->status),
+                 "NVIDIA closed this session (after a while without input, or from another device). "
+                 "Press A to start the game again.");
+        diagnostic_log("CLOUDMATCH", "%s: session over (status %d)", operation, client->session_status);
+        json_decref(root);
+        return false;
     } else if (client->queue_position > 0 ||
                (client->session_status == 0 && client->queue_best <= 0)) {
         client->session_state = GFN_SESSION_QUEUED;
@@ -2208,6 +2220,8 @@ bool gfn_recover_session(GfnClient *client, const GfnGame *game)
     http_response_free(&response);
     diagnostic_log("CLOUDMATCH", "recover: http=%ld status=%d paused=%d state=%d", http, client->session_status,
                    client->session_paused, client->session_state);
+    if (!applied && client->session_state == GFN_SESSION_ERROR && !strcmp(client->fail_code, "ended"))
+        return false;
     if (!applied) {
         /* Busy or unknown: keep the session; the next attempt asks again. */
         if (client->session_state == GFN_SESSION_ERROR && !client->session_paused)

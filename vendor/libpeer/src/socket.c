@@ -41,6 +41,8 @@ int udp_socket_add_multicast_group(UdpSocket* udp_socket, Address* mcast_addr) {
 #endif
 }
 
+int udp_socket_rcvbuf_granted = -1;
+
 int udp_socket_open(UdpSocket* udp_socket, int family, int port) {
   int ret;
   int reuse = 1;
@@ -87,15 +89,30 @@ int udp_socket_open(UdpSocket* udp_socket, int family, int port) {
   }
 
   do {
-    if (setsockopt(udp_socket->fd, SOL_SOCKET, SO_RCVBUF,
-                   &receive_buffer, sizeof(receive_buffer)) < 0) {
-      LOGW("Failed to enlarge UDP receive buffer: %s", strerror(errno));
-    } else {
-      socklen_t option_size = sizeof(receive_buffer);
-      if (getsockopt(udp_socket->fd, SOL_SOCKET, SO_RCVBUF,
-                     &receive_buffer, &option_size) == 0) {
-        LOGI("UDP receive buffer: %d bytes", receive_buffer);
+    /* Kasumi: step down until the 3DS accepts a size (as moonlight-common-c
+     * does on 3DS), and record what was granted: a refused 128 KiB used to
+     * leave the system default silently, and nobody could tell. */
+    udp_socket_rcvbuf_granted = -1;
+    for (;;) {
+      if (setsockopt(udp_socket->fd, SOL_SOCKET, SO_RCVBUF,
+                     &receive_buffer, sizeof(receive_buffer)) == 0) {
+        socklen_t option_size = sizeof(udp_socket_rcvbuf_granted);
+        if (getsockopt(udp_socket->fd, SOL_SOCKET, SO_RCVBUF,
+                       &udp_socket_rcvbuf_granted, &option_size) != 0)
+          udp_socket_rcvbuf_granted = receive_buffer;
+        LOGI("UDP receive buffer: %d bytes", udp_socket_rcvbuf_granted);
+        break;
       }
+      if (receive_buffer <= 32 * 1024) {
+        socklen_t option_size = sizeof(udp_socket_rcvbuf_granted);
+        if (getsockopt(udp_socket->fd, SOL_SOCKET, SO_RCVBUF,
+                       &udp_socket_rcvbuf_granted, &option_size) != 0)
+          udp_socket_rcvbuf_granted = 0;
+        udp_socket_rcvbuf_granted = -udp_socket_rcvbuf_granted - 1; /* negative: refused, default kept */
+        LOGW("Failed to enlarge UDP receive buffer: %s", strerror(errno));
+        break;
+      }
+      receive_buffer -= 16 * 1024;
     }
 
     if ((ret = setsockopt(udp_socket->fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse))) < 0) {

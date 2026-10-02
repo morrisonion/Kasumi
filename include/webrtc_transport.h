@@ -105,7 +105,19 @@ typedef struct {
     char media_ip[64];
     char pending_local_candidates[5][256];
     char status[160];
+    /* Media is received on the New 3DS's second app core (core 2). */
+    bool media_threaded;
 } WebRtcTransport;
+
+/* While media runs on its own core, the peer connection and the video
+ * decoder's frames are shared: hold this around presenting a frame. */
+void webrtc_transport_lock(void);
+void webrtc_transport_unlock(void);
+/* The stream loop's wait: for packets on core 2, or on the media socket. */
+void webrtc_transport_wait(WebRtcTransport *transport, int timeout_ms);
+/* HOME Menu or sleep: the media core stops handing packets on, as the main
+ * loop did by not running. */
+void webrtc_transport_pause(bool paused);
 
 void webrtc_transport_init(WebRtcTransport *transport);
 bool webrtc_transport_start(WebRtcTransport *transport, struct NvstSignal *signal,

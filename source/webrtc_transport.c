@@ -10,7 +10,10 @@
 #include "peer.h"
 #include "peer_connection.h"
 #include "address.h"
+#include "socket.h"
+#include "agent.h"
 #include <jansson.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -238,10 +241,13 @@ static char *build_nvst(const char *answer)
         "a=vqos.bw.txRxLag.minFeedbackTxDeltaMs:200\na=vqos.drc.bitrateIirFilterFactor:18\n"
         "a=video.packetSize:1140\na=video.rtpNackQueueLength:1024\n"
         "a=video.rtpNackQueueMaxPackets:512\na=video.rtpNackMaxPacketCount:25\n"
-        "a=packetPacing.numGroups:10\na=packetPacing.minNumPacketsPerGroup:4\n"
-        "a=packetPacing.minNumPacketsFrame:4\na=packetPacing.maxDelayUs:3000\n"
+        "a=packetPacing.numGroups:%u\na=packetPacing.minNumPacketsPerGroup:4\n"
+        "a=packetPacing.minNumPacketsFrame:4\na=packetPacing.maxDelayUs:%u\n"
         "a=video.mapRtpTimestampsToFrames:1\na=video.clientViewportWd:%u\n"
         "a=video.clientViewportHt:%u\na=video.maxFPS:30\na=video.maxNumReferenceFrames:4\n"
+        /* The peak and limit attributes stay: beta.25 tried the web client's
+         * set without them, the rate did not rise, and NVIDIA then ignored the
+         * cap (Weak's 1 Mbps ran at ~1.3 on the wire, with ~3 resends/s). */
         "a=video.initialBitrateKbps:%u\n"
         "a=video.initialPeakBitrateKbps:%u\na=vqos.bw.maximumBitrateKbps:%u\n"
         "a=vqos.bw.minimumBitrateKbps:%u\na=vqos.bw.peakBitrateKbps:%u\n"
@@ -256,6 +262,7 @@ static char *build_nvst(const char *answer)
         "a=ri.hidDeviceMask:4294967295\na=ri.enablePartiallyReliableTransferGamepad:15\n"
         "a=ri.enablePartiallyReliableTransferHid:4294967295\n",
         pwd, ufrag, fingerprint, stream_profile_dynamic_mode(),
+        stream_profile_pacing_groups(), stream_profile_pacing_delay_us(),
         stream_profile_width(), stream_profile_height(),
         stream_profile_initial_bitrate(), stream_profile_max_bitrate(),
         stream_profile_max_bitrate(), stream_profile_min_bitrate(),
@@ -486,7 +493,162 @@ static void on_state(PeerConnectionState state, void *userdata)
     }
 }
 
-void webrtc_transport_init(WebRtcTransport *t) { memset(t, 0, sizeof(*t)); }
+/* Media on core 2. Everything ran on core 0 until beta.25 (AffinityMask 1):
+ * receiving, decrypting and re-requesting packets shared the core with
+ * drawing, sound and input, and the stats counted up to 401 main-loop
+ * stalls over 25 ms in one session. The media thread runs libpeer's loop;
+ * every other use of the peer, and presenting a decoded frame (the decoder
+ * can be rebuilt from a packet callback), happens under g_peer_lock. */
+static RecursiveLock g_peer_lock;
+static LightEvent g_media_event;
+static Thread g_media_thread;
+static volatile bool g_media_run;
+static volatile bool g_media_paused;
+
+void webrtc_transport_pause(bool paused) { g_media_paused = paused; }
+
+void webrtc_transport_lock(void) { RecursiveLock_Lock(&g_peer_lock); }
+void webrtc_transport_unlock(void) { RecursiveLock_Unlock(&g_peer_lock); }
+
+/* Receive-path timing (beta.25 engine test): where does a packet's time go
+ * between the radio and the decoder? Logged every 10 s while media flows. */
+#define TICKS_PER_US (SYSCLOCK_ARM11 / 1000000u)
+typedef struct {
+    unsigned polls, ready, packets, wakes, cap_hits, slow_reads, per_wake_max;
+    uint64_t poll_ready_us, poll_ready_max, read_us, read_max, lock_max;
+} RxStats;
+
+static void rx_stats_log(RxStats *s, unsigned seconds)
+{
+    if (!s->packets && !s->polls) return;
+    diagnostic_log("NET", "rx %us: packets=%u wakes=%u perWakeMax=%u capHits=%u polls=%u ready=%u "
+                   "pollReadyAvg/Max=%llu/%lluus readAvg/Max=%llu/%lluus slowReads(>2ms)=%u lockWaitMax=%lluus",
+                   seconds, s->packets, s->wakes, s->per_wake_max, s->cap_hits, s->polls, s->ready,
+                   (unsigned long long)(s->ready ? s->poll_ready_us / s->ready : 0),
+                   (unsigned long long)s->poll_ready_max,
+                   (unsigned long long)(s->packets ? s->read_us / s->packets : 0),
+                   (unsigned long long)s->read_max, s->slow_reads, (unsigned long long)s->lock_max);
+    diagnostic_log("NET", "rx select: calls=%u avg/max=%llu/%lluus", agent_select_calls,
+                   (unsigned long long)(agent_select_calls ? agent_select_us_total / agent_select_calls : 0),
+                   (unsigned long long)agent_select_us_max);
+    agent_select_calls = 0;
+    agent_select_us_total = agent_select_us_max = 0;
+    memset(s, 0, sizeof(*s));
+}
+
+static void media_main(void *arg)
+{
+    WebRtcTransport *t = arg;
+    uint64_t last_loop = 0, last_stats = osGetTime();
+    RxStats stats;
+    memset(&stats, 0, sizeof(stats));
+    diagnostic_log("NET", "media socket receive buffer: %d bytes%s", udp_socket_rcvbuf_granted < 0
+                   ? -udp_socket_rcvbuf_granted - 1 : udp_socket_rcvbuf_granted,
+                   udp_socket_rcvbuf_granted < 0 ? " (system default: every larger size was refused)" : "");
+    while (g_media_run) {
+        const int fd = peer_connection_get_udp_fd(t->peer);
+        bool readable = false;
+        if (fd >= 0) {
+            struct pollfd media = { .fd = fd, .events = POLLIN, .revents = 0 };
+            const uint64_t poll_start = svcGetSystemTick();
+            readable = poll(&media, 1, 4) > 0 && (media.revents & POLLIN);
+            ++stats.polls;
+            if (readable) {
+                const uint64_t us = (svcGetSystemTick() - poll_start) / TICKS_PER_US;
+                ++stats.ready;
+                stats.poll_ready_us += us;
+                if (us > stats.poll_ready_max) stats.poll_ready_max = us;
+            }
+        } else {
+            svcSleepThread(4000000LL);
+        }
+        if (!g_media_run) break;
+        if (g_media_paused) {
+            svcSleepThread(10000000LL);
+            continue;
+        }
+        /* Timers (ICE, DTLS, RTCP, re-requests) need a turn even when
+         * quiet, as on the main loop before. */
+        const uint64_t now = osGetTime();
+        if (now - last_stats >= 60000) {
+            rx_stats_log(&stats, (unsigned)((now - last_stats) / 1000));
+            last_stats = now;
+        }
+        if (!readable && now - last_loop < 16) continue;
+        last_loop = now;
+        /* One datagram per lock, so input and frames never wait long. */
+        unsigned this_wake = 0, i = 0;
+        for (; i < 64 && g_media_run; ++i) {
+            const uint64_t lock_start = svcGetSystemTick();
+            RecursiveLock_Lock(&g_peer_lock);
+            const uint64_t read_start = svcGetSystemTick();
+            const int handled = peer_connection_loop(t->peer);
+            const uint64_t read_end = svcGetSystemTick();
+            RecursiveLock_Unlock(&g_peer_lock);
+            const uint64_t lock_us = (read_start - lock_start) / TICKS_PER_US;
+            if (lock_us > stats.lock_max) stats.lock_max = lock_us;
+            if (handled <= 0) break;
+            const uint64_t us = (read_end - read_start) / TICKS_PER_US;
+            ++this_wake;
+            stats.read_us += us;
+            if (us > stats.read_max) stats.read_max = us;
+            if (us > 2000) ++stats.slow_reads;
+        }
+        if (i == 64) ++stats.cap_hits;
+        ++stats.wakes;
+        stats.packets += this_wake;
+        if (this_wake > stats.per_wake_max) stats.per_wake_max = this_wake;
+        LightEvent_Signal(&g_media_event);
+    }
+}
+
+static void media_thread_start(WebRtcTransport *t)
+{
+    s32 priority = 0x30;
+    svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+    g_media_run = true;
+    g_media_thread = threadCreate(media_main, t, 32 * 1024, priority - 1, 2, false);
+    t->media_threaded = g_media_thread != NULL;
+    if (!t->media_threaded) g_media_run = false;
+    diagnostic_log("WEBRTC", "media %s", t->media_threaded ? "on core 2" : "on the main core (core 2 unavailable)");
+}
+
+static void media_thread_stop(WebRtcTransport *t)
+{
+    if (!g_media_thread) return;
+    g_media_run = false;
+    threadJoin(g_media_thread, U64_MAX);
+    threadFree(g_media_thread);
+    g_media_thread = NULL;
+    t->media_threaded = false;
+}
+
+void webrtc_transport_wait(WebRtcTransport *t, int timeout_ms)
+{
+    if (t->media_threaded) {
+        LightEvent_WaitTimeout(&g_media_event, (s64)timeout_ms * 1000000LL);
+        return;
+    }
+    const int fd = webrtc_transport_socket(t);
+    if (fd < 0) {
+        svcSleepThread((s64)timeout_ms * 1000000LL);
+        return;
+    }
+    struct pollfd media = { .fd = fd, .events = POLLIN, .revents = 0 };
+    if (poll(&media, 1, timeout_ms) > 0 && (media.revents & POLLIN))
+        t->media_readable = true;
+}
+
+void webrtc_transport_init(WebRtcTransport *t)
+{
+    static bool once;
+    if (!once) {
+        RecursiveLock_Init(&g_peer_lock);
+        LightEvent_Init(&g_media_event, RESET_ONESHOT);
+        once = true;
+    }
+    memset(t, 0, sizeof(*t));
+}
 
 static void add_manual_media_candidate(WebRtcTransport *t)
 {
@@ -568,6 +730,7 @@ bool webrtc_transport_start(WebRtcTransport *t, NvstSignal *signal,
     add_manual_media_candidate(t);
     snprintf(t->status, sizeof(t->status), "Answer sent; ICE local %u/%u",
              t->sent_local_candidates, t->local_candidates);
+    media_thread_start(t);
     return true;
 fail:
     free(offer); webrtc_transport_close(t);
@@ -625,16 +788,25 @@ static void apply_candidates(WebRtcTransport *t, NvstSignal *signal)
     }
 }
 
+static void transport_tick(WebRtcTransport *t, NvstSignal *signal);
+
 void webrtc_transport_tick(WebRtcTransport *t, NvstSignal *signal)
 {
     if (!t->peer) return;
+    RecursiveLock_Lock(&g_peer_lock);
+    transport_tick(t, signal);
+    RecursiveLock_Unlock(&g_peer_lock);
+}
+
+static void transport_tick(WebRtcTransport *t, NvstSignal *signal)
+{
     send_local_candidates(t, signal);
     apply_candidates(t, signal);
     /* GFN sends video in short bursts. Drain enough datagrams per vblank to
      * keep those bursts out of the kernel queue, while retaining a hard cap
      * so input and app lifecycle work cannot starve. */
     const uint64_t now = osGetTime();
-    if (t->media_readable || now - t->last_media_poll_at >= 16) {
+    if (!t->media_threaded && (t->media_readable || now - t->last_media_poll_at >= 16)) {
         for (unsigned i = 0; i < 64 && peer_connection_loop(t->peer) > 0; ++i) {}
         t->last_media_poll_at = now;
     }
@@ -824,8 +996,10 @@ bool webrtc_transport_mouse_move(WebRtcTransport *t, int16_t dx, int16_t dy)
     const uint64_t timestamp_us = (osGetTime() - t->connected_at) * 1000ULL;
     const size_t size = gfn_input_encode_mouse_move(packet, dx, dy,
         timestamp_us, t->input_protocol_version);
+    RecursiveLock_Lock(&g_peer_lock);
     const bool ok = peer_connection_datachannel_send_binary_sid(t->peer,
         (char *)packet, size, 0) >= 0;
+    RecursiveLock_Unlock(&g_peer_lock);
     if (ok) t->mouse_moves++;
     return ok;
 }
@@ -837,8 +1011,10 @@ bool webrtc_transport_mouse_button(WebRtcTransport *t, bool pressed)
     const uint64_t timestamp_us = (osGetTime() - t->connected_at) * 1000ULL;
     const size_t size = gfn_input_encode_mouse_button(packet, pressed,
         timestamp_us, t->input_protocol_version);
+    RecursiveLock_Lock(&g_peer_lock);
     const bool ok = peer_connection_datachannel_send_binary_sid(t->peer,
         (char *)packet, size, 0) >= 0;
+    RecursiveLock_Unlock(&g_peer_lock);
     if (ok && !pressed) t->mouse_clicks++;
     diagnostic_log("INPUT", "mouse button %s sent=%u count=%u",
                    pressed ? "down" : "up", ok ? 1 : 0, t->mouse_clicks);
@@ -853,12 +1029,14 @@ bool webrtc_transport_send_key(WebRtcTransport *t, uint16_t keycode,
     const uint64_t timestamp_us = (osGetTime() - t->connected_at) * 1000ULL;
     size_t size = gfn_input_encode_key(packet, keycode, scancode, modifiers,
         true, timestamp_us, t->input_protocol_version);
+    RecursiveLock_Lock(&g_peer_lock);
     const bool down = peer_connection_datachannel_send_binary_sid(t->peer,
         (char *)packet, size, 0) >= 0;
     size = gfn_input_encode_key(packet, keycode, scancode, modifiers,
         false, timestamp_us + 1000, t->input_protocol_version);
     const bool up = peer_connection_datachannel_send_binary_sid(t->peer,
         (char *)packet, size, 0) >= 0;
+    RecursiveLock_Unlock(&g_peer_lock);
     if (down && up) t->keyboard_keys++;
     /* Never log keys, characters, or login text. */
     return down && up;
@@ -882,6 +1060,7 @@ bool webrtc_transport_gameplay_ready(const WebRtcTransport *t)
 void webrtc_transport_close(WebRtcTransport *t)
 {
     if (!t) return;
+    media_thread_stop(t);
     if (t->peer) peer_connection_destroy(t->peer);
     audio_output_close();
     mvd_video_close();
