@@ -19,7 +19,7 @@
 static void active_clear(void);
 #define SESSION_PATH DATA_DIR "/gfn-session.json"
 #define SESSION_TMP DATA_DIR "/gfn-session.tmp"
-#define DEVICE_PATH DATA_DIR "/device-id.txt"
+#define DEVICE_PATH DATA_DIR "/device-id2.txt" /* see SESSION_DEVICE_PATH */
 #define ACTIVE_SESSION_PATH APP_DATA_DIR "/active-session.json"
 
 static const char *DEVICE_CLIENT_ID = "q61ddeJrVt7O90Nl-P-N7I36yctih4Ml6FyXLrb6j-U";
@@ -37,10 +37,32 @@ static bool cloudmatch_status_is_transient(long status)
     return status == 408 || status == 429 || status == 502 || status == 503 || status == 504;
 }
 
+/* Random bytes from the 3DS's hardware generator. rand() was not enough:
+ * newlib keeps its state per thread, every thread starts at the same seed,
+ * and the ids are made on the network worker, which was never seeded. So
+ * every console made the same "random" device id, and NVIDIA counted all
+ * Kasumi players' sessions against one device:
+ * SESSION_LIMIT_PER_DEVICE_EXCEEDED with no session of the player's own,
+ * worst at busy hours, gone when someone else's game ended. */
+static void random_fill(unsigned char *bytes, size_t size)
+{
+    if (R_SUCCEEDED(psInit())) {
+        const Result rc = PS_GenerateRandomBytes(bytes, size);
+        psExit();
+        if (R_SUCCEEDED(rc)) return;
+    }
+    diagnostic_log("APP", "hardware random unavailable; using the clock");
+    for (size_t i = 0; i < size; ++i) {
+        const u64 tick = svcGetSystemTick();
+        bytes[i] = (unsigned char)(tick ^ (tick >> 8) ^ (tick >> 16) ^ (osGetTime() * 2654435761u));
+        svcSleepThread(1000 + (tick & 0x3ff));
+    }
+}
+
 static void generate_uuid(char output[40])
 {
     unsigned char bytes[16];
-    for (size_t i = 0; i < sizeof(bytes); ++i) bytes[i] = (unsigned char)rand();
+    random_fill(bytes, sizeof(bytes));
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     snprintf(output, 40,
@@ -132,17 +154,17 @@ static void get_device_id(char output[40])
     mkdir("sdmc:/3ds", 0777);
     mkdir(DATA_DIR, 0777);
     generate_uuid(output);
+    diagnostic_log("AUTH", "new device id made (one per console)");
     file = fopen(DEVICE_PATH, "w");
     if (file) { fputs(output, file); fclose(file); }
 }
 
 /* The device id game sessions use (x-device-id, deviceHashId). It starts as
  * the sign-in device id and is replaced when NVIDIA refuses every launch
- * "per device" while no session exists: beta.21 reports showed consoles
- * refused SESSION_LIMIT_PER_DEVICE_EXCEEDED for hours, after restarts, on
- * beta.18 and beta.21 alike, with nothing listed and no other session named.
- * The sign-in keeps its own id, so the saved login is not affected. */
-#define SESSION_DEVICE_PATH DATA_DIR "/session-device-id.txt"
+ * "per device" while no session exists. The sign-in keeps its own id, so the
+ * saved login is not affected. Both files are new in beta.26: ids made by
+ * beta.25 and older were shared by every console (see random_fill). */
+#define SESSION_DEVICE_PATH DATA_DIR "/session-device-id2.txt"
 
 static void get_session_device_id(char output[40])
 {
