@@ -38,6 +38,10 @@ typedef struct {
     StreamBitrateMode bitrate_mode;
     /* NVIDIA encoder options, applied at the next launch. */
     bool sharpen;
+    /* Kasumi's own picture filter on the GPU (Wide mode, live):
+     * sharpening 0 = off ... 3 = strong, colour 0 = natural ... 2 = vivid+. */
+    unsigned video_sharpen;
+    unsigned video_color;
     GfnGyroMode gyro_mode;
     unsigned gyro_speed;
     /* C-Stick speed and inversion (GfnInputConfig). */

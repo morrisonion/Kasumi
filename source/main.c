@@ -17,6 +17,9 @@
 #include "game_prefs.h"
 #include "menu_audio.h"
 #include "sfx.h"
+#include "shortcut.h"
+#include "gallery.h"
+#include "queue_eta.h"
 #include "queue_alert.h"
 #include "regions.h"
 #include "report.h"
@@ -298,6 +301,7 @@ static void render(bool draw_bottom)
         render_wide_video(draw_bottom);
         return;
     }
+    if (video) ui_top_classic_video();
     if (video && !draw_bottom) {
         present_video();
         return;
@@ -306,12 +310,15 @@ static void render(bool draw_bottom)
      * input keep flowing while the lower screen redraws. */
     ui_frame_begin(!video);
     if (!video) {
+        /* A shortcut's icon and banner, drawn offscreen (menus only). */
+        shortcut_frame();
         ui_begin_top();
         screens_draw_top(&g_app);
     }
     ui_begin_bottom();
     screens_draw_bottom(&g_app);
     ui_frame_end();
+    shortcut_frame_end();
     if (video) present_video();
 }
 
@@ -349,7 +356,8 @@ static bool g_auto_inflight;
 
 static bool background_job(NetJobKind kind)
 {
-    return kind == NET_JOB_SEND_STATS || kind == NET_JOB_UPDATE_CHECK || kind == NET_JOB_KEEP_LOGIN;
+    return kind == NET_JOB_SEND_STATS || kind == NET_JOB_UPDATE_CHECK || kind == NET_JOB_KEEP_LOGIN ||
+           kind == NET_JOB_SHORTCUT;
 }
 
 /* Hand a blocking call to the network worker; the UI keeps animating. */
@@ -727,6 +735,11 @@ static void change_setting(int direction)
         return;
     }
     if (index == SETTING_COMMUNITY) return; /* the QR code on the bottom screen is the whole row */
+    if (index == SETTING_SCREENSHOTS) {
+        if (gallery_open()) g_app.gallery_open = true;
+        else show_notice("No screenshots yet: in a game, open the stream menu and pick Screenshot");
+        return;
+    }
     if (index == SETTING_SHARE_STATS) {
         screens_setting_change(&g_app, index, direction);
         if (!g_app.settings.share_stats) { remove(REPORT_STATS_PENDING_PATH); remove(LAUNCH_PENDING_PATH); }
@@ -829,6 +842,24 @@ static void update_pointer_click(u32 down, u32 held)
 
 static void handle_modal(u32 down, AppAction action)
 {
+    if (g_app.modal == MODAL_PROVIDER_PICK) {
+        /* A: the partner, X: NVIDIA, B: back. The answer is kept. */
+        GfnProvider partner;
+        providers_partner_here(&partner, NULL);
+        const bool pick_partner = (down & KEY_A) || action == ACTION_CONFIRM;
+        const bool pick_nvidia = (down & KEY_X) || action == ACTION_DISMISS;
+        if (pick_partner || pick_nvidia) {
+            snprintf(g_app.settings.provider, sizeof(g_app.settings.provider), "%s",
+                     pick_partner ? partner.code : PROVIDER_NVIDIA);
+            save_settings();
+            g_app.modal = MODAL_NONE;
+            diagnostic_log("AUTH", "provider picked at sign-in: %s", g_app.settings.provider);
+            begin_login();
+        } else if (down & KEY_B) {
+            g_app.modal = MODAL_NONE;
+        }
+        return;
+    }
     const bool confirm = (down & KEY_A) || action == ACTION_CONFIRM || action == ACTION_RETRY;
     const bool dismiss = (down & KEY_B) || action == ACTION_DISMISS;
     if (!confirm && !dismiss) return;
@@ -894,6 +925,20 @@ static void handle_modal(u32 down, AppAction action)
         submit_job(NET_JOB_SEND_REPORT, "Sending diagnostic report...", NULL, NULL);
         return;
     }
+    if (modal == MODAL_SHORTCUT_REMOVE) {
+        const GfnGame *game = app_game(&g_app, g_app.selected);
+        if (game && shortcut_request_remove(game->app_id)) g_app.shortcut_sheet = SHORTCUT_SHEET_WORKING;
+        return;
+    }
+    if (modal == MODAL_DELETE_SHOT) {
+        if (!gallery_delete_current()) show_notice("The screenshot could not be deleted");
+        else if (!gallery_count()) {
+            gallery_close();
+            g_app.gallery_open = false;
+            show_notice("No screenshots left");
+        }
+        return;
+    }
     if (modal == MODAL_EXIT) {
         g_quit = true;
     } else if (modal == MODAL_SIGN_OUT) {
@@ -906,10 +951,34 @@ static void handle_modal(u32 down, AppAction action)
     }
 }
 
+/* Sign in. Where the internet address says a partner runs GeForce NOW and
+ * no provider was chosen yet, ask first which one the account is from:
+ * guessing went wrong both ways (beta.21: a Chilean NVIDIA account sent
+ * through Digevo; beta.29: an Australian on NVIDIA, refused every game). */
+static void sign_in(void)
+{
+    GfnProvider partner;
+    bool only = false;
+    if (!g_app.settings.provider[0] && providers_partner_here(&partner, &only)) {
+        char country[4], text[192];
+        providers_country(country, sizeof(country));
+        snprintf(text, sizeof(text), only
+                 ? "You're in %s, where GeForce NOW is run by %s. Pick NVIDIA only if you signed up on nvidia.com."
+                 : "You're in %s, where GeForce NOW is also sold by %s. Pick the one you signed up with.",
+                 providers_country_name(country), partner.name);
+        open_modal(MODAL_PROVIDER_PICK, "選択", "WHERE'S YOUR ACCOUNT FROM?", text);
+        return;
+    }
+    begin_login();
+}
+
 static void handle_welcome(u32 down, AppAction action)
 {
-    if ((down & KEY_A) || action == ACTION_SIGN_IN) begin_login();
-    else if ((down & KEY_SELECT) || action == ACTION_SETTINGS) g_app.settings_open = true;
+    if ((down & KEY_A) || action == ACTION_SIGN_IN) sign_in();
+    else if ((down & KEY_SELECT) || action == ACTION_SETTINGS) {
+        g_app.settings_open = true;
+        g_app.settings_section = -1;
+    }
     else if ((down & KEY_START) || action == ACTION_EXIT)
         open_modal(MODAL_EXIT, "終了", "EXIT KASUMI?", "Return to the HOME Menu.");
 }
@@ -1036,6 +1105,7 @@ static void handle_library(u32 down, u32 repeat, AppAction action)
         show_saved_library();
     } else if ((down & KEY_SELECT) || action == ACTION_SETTINGS) {
         g_app.settings_open = true;
+        g_app.settings_section = -1;
     } else if (down & KEY_START) {
         open_modal(MODAL_EXIT, "終了", "EXIT KASUMI?", "Return to the HOME Menu.");
     }
@@ -1208,10 +1278,63 @@ static void handle_options(u32 down, u32 repeat, AppAction action)
     game_prefs_set(game->app_id, &prefs);
 }
 
+/* Game page: put the game on the HOME Menu, or take it off. */
+static void shortcut_action(const GfnGame *game)
+{
+    if (shortcut_state() != SHORTCUT_IDLE) {
+        show_notice("Still making the last shortcut");
+        return;
+    }
+    /* The shortcut jumps to the installed Kasumi title. */
+    if (updater_is_3dsx()) {
+        show_notice("Shortcuts need Kasumi installed as a CIA (with FBI), not the .3dsx");
+        return;
+    }
+    if (shortcut_exists(game->app_id)) {
+        open_modal(MODAL_SHORTCUT_REMOVE, "削除", "REMOVE THE SHORTCUT?",
+                   "Takes this game's shortcut off the HOME Menu. You can add it again any time.");
+        return;
+    }
+    g_app.shortcut_message[0] = '\0';
+    if (shortcut_request(game, g_app.details_variant)) {
+        g_app.shortcut_sheet = SHORTCUT_SHEET_WORKING;
+    } else {
+        snprintf(g_app.shortcut_message, sizeof(g_app.shortcut_message), "%s",
+                 shortcut_result()[0] ? shortcut_result() : "Couldn't start making the shortcut.");
+        g_app.shortcut_sheet = SHORTCUT_SHEET_FAILED;
+    }
+}
+
+/* The sheet over the game page: nothing else on it can be pressed until
+ * the shortcut is made, so nobody leaves halfway thinking it stalled. */
+static void handle_shortcut_sheet(const GfnGame *game, u32 down, AppAction action)
+{
+    switch (g_app.shortcut_sheet) {
+    case SHORTCUT_SHEET_WORKING:
+        if (down & (KEY_B | KEY_A)) show_notice("Almost there: keep Kasumi open");
+        return;
+    case SHORTCUT_SHEET_FAILED:
+        if ((down & KEY_A) || action == ACTION_RETRY) {
+            g_app.shortcut_sheet = SHORTCUT_SHEET_NONE;
+            shortcut_action(game);
+        } else if ((down & KEY_B) || action == ACTION_DISMISS) {
+            g_app.shortcut_sheet = SHORTCUT_SHEET_NONE;
+        }
+        return;
+    default:
+        if ((down & (KEY_A | KEY_B)) || action == ACTION_CONFIRM) g_app.shortcut_sheet = SHORTCUT_SHEET_NONE;
+        return;
+    }
+}
+
 static void handle_details(u32 down, u32 repeat, AppAction action)
 {
     const GfnGame *game = app_game(&g_app, g_app.selected);
     if (!game) { g_app.details_open = false; return; }
+    if (g_app.shortcut_sheet != SHORTCUT_SHEET_NONE) {
+        handle_shortcut_sheet(game, down, action);
+        return;
+    }
     if (g_app.options_open || action == ACTION_OPTIONS_CLOSE) {
         handle_options(down, repeat, action);
         return;
@@ -1229,6 +1352,8 @@ static void handle_details(u32 down, u32 repeat, AppAction action)
     } else if ((down & KEY_X) || action == ACTION_OPTIONS) {
         g_app.options_open = true;
         g_app.options_index = 0;
+    } else if ((down & KEY_SELECT) || action == ACTION_SHORTCUT) {
+        shortcut_action(game);
     } else if (variants > 1 && ((repeat & KEY_LEFT) || action == ACTION_VARIANT_PREV)) {
         g_app.details_variant = (g_app.details_variant + variants - 1) % variants;
     } else if (variants > 1 && ((repeat & KEY_RIGHT) || action == ACTION_VARIANT_NEXT)) {
@@ -1244,10 +1369,56 @@ static void handle_details(u32 down, u32 repeat, AppAction action)
     }
 }
 
+static void open_settings_section(int section)
+{
+    g_app.settings_section = section;
+    g_app.settings_grid = section;
+    g_app.setting_index = screens_section_first(section);
+}
+
+static void handle_gallery(u32 down, u32 repeat, AppAction action)
+{
+    if ((repeat & (KEY_L | KEY_LEFT)) || action == ACTION_GALLERY_PREV) gallery_step(-1);
+    if ((repeat & (KEY_R | KEY_RIGHT)) || action == ACTION_GALLERY_NEXT) gallery_step(1);
+    if (((down & KEY_X) || action == ACTION_GALLERY_DELETE) && gallery_count())
+        open_modal(MODAL_DELETE_SHOT, "削除", "DELETE THIS SCREENSHOT?",
+                   "It is removed from the SD card for good.");
+    if ((down & KEY_B) || action == ACTION_GALLERY_CLOSE) {
+        gallery_close();
+        g_app.gallery_open = false;
+    }
+}
+
 static void handle_settings(u32 down, u32 repeat, AppAction action)
 {
-    if (repeat & KEY_UP) g_app.setting_index = (g_app.setting_index + SETTING_COUNT - 1) % SETTING_COUNT;
-    if (repeat & KEY_DOWN) g_app.setting_index = (g_app.setting_index + 1) % SETTING_COUNT;
+    if (g_app.gallery_open) {
+        handle_gallery(down, repeat, action);
+        return;
+    }
+    const int sections = screens_section_count();
+    /* The grid of sections. */
+    if (g_app.settings_section < 0) {
+        int *grid = &g_app.settings_grid;
+        if (repeat & KEY_LEFT) *grid = (*grid + sections - 1) % sections;
+        if (repeat & KEY_RIGHT) *grid = (*grid + 1) % sections;
+        if (repeat & (KEY_UP | KEY_DOWN)) *grid = (*grid + 3) % sections;
+        if (action == ACTION_SETTINGS_SECTION && screens_touched_section() >= 0)
+            open_settings_section(screens_touched_section());
+        else if (down & KEY_A)
+            open_settings_section(*grid);
+        else if ((down & (KEY_B | KEY_SELECT)) || action == ACTION_BACK) {
+            save_settings();
+            g_app.settings_open = false;
+        }
+        return;
+    }
+    /* One section: up and down stay inside it, L and R change it. */
+    const int section = g_app.settings_section;
+    const int first = screens_section_first(section), size = screens_section_size(section);
+    if (repeat & KEY_UP) g_app.setting_index = first + (g_app.setting_index - first + size - 1) % size;
+    if (repeat & KEY_DOWN) g_app.setting_index = first + (g_app.setting_index - first + 1) % size;
+    if (down & KEY_L) { open_settings_section((section + sections - 1) % sections); return; }
+    if (down & KEY_R) { open_settings_section((section + 1) % sections); return; }
     if ((repeat & KEY_LEFT) || action == ACTION_VALUE_PREV) change_setting(-1);
     if ((repeat & KEY_RIGHT) || (down & KEY_A) || action == ACTION_VALUE_NEXT) change_setting(1);
     if ((down & KEY_X) && screens_setting_at(g_app.setting_index) == SETTING_MUSIC) menu_audio_next();
@@ -1258,7 +1429,9 @@ static void handle_settings(u32 down, u32 repeat, AppAction action)
             return;
         }
         save_settings();
-        g_app.settings_open = false;
+        /* B goes back to the sections; SELECT leaves Settings. */
+        if (down & KEY_SELECT) g_app.settings_open = false;
+        g_app.settings_section = -1;
     }
 }
 
@@ -1453,18 +1626,13 @@ static void finish_history(void)
  * about 1.9 s per place. So the estimate is (starting place x learned
  * seconds per place) minus the time already waited, and every finished
  * queue refines the learned rate. */
-#define QUEUE_STATS_PATH APP_DATA_DIR "/queue.json"
-
-static float g_seconds_per_place = 1.9f;
+/* Only when neither the shared estimate nor this console's own queues say
+ * anything (queue_eta.h). */
+static const float g_seconds_per_place = 1.9f;
 
 static void queue_stats_load(void)
 {
-    json_error_t error;
-    json_t *root = json_load_file(QUEUE_STATS_PATH, 0, &error);
-    json_t *rate = json_is_object(root) ? json_object_get(root, "seconds_per_place") : NULL;
-    if (json_is_number(rate) && json_number_value(rate) > 0.2 && json_number_value(rate) < 60.0)
-        g_seconds_per_place = (float)json_number_value(rate);
-    json_decref(root);
+    queue_eta_load();
 }
 
 /* Connected to an access point (ac:u), checked at most twice a second. */
@@ -1551,8 +1719,15 @@ static void track_queue(void)
     if (queued) {
         if (!queued_at) queued_at = now;
         if (!start_place && g_client.queue_position > 0) start_place = g_client.queue_position;
-        if (!start_place) { g_app.queue_eta = -1; return; }
-        const float expected = (float)start_place * g_seconds_per_place;
+        /* Everyone's recent queues with this provider (base + per place),
+         * else this console's own, else a rough guess from the place. */
+        GfnProvider provider;
+        provider_active(&provider);
+        float expected = 0.0f;
+        if (!queue_eta_expected(provider.code, start_place, &expected)) {
+            if (!start_place) { g_app.queue_eta = -1; return; }
+            expected = (float)start_place * g_seconds_per_place;
+        }
         const float left = expected - (float)(now - queued_at) / 1000.0f;
         g_app.queue_eta = left > 20.0f ? (int)left : 0;
         return;
@@ -1562,15 +1737,13 @@ static void track_queue(void)
         (g_client.session_state == GFN_SESSION_SETUP || g_client.session_state == GFN_SESSION_READY)) {
         const float seconds = (float)(now - queued_at) / 1000.0f;
         alert_pending = seconds >= 20.0f;
-        const float rate = seconds / (float)start_place;
-        if (rate > 0.2f && rate < 60.0f) {
-            g_seconds_per_place = g_seconds_per_place * 0.6f + rate * 0.4f;
-            json_t *root = json_pack("{s:f}", "seconds_per_place", (double)g_seconds_per_place);
-            if (root) json_dump_file(root, QUEUE_STATS_PATH, JSON_COMPACT);
-            json_decref(root);
-            diagnostic_log("QUEUE", "finished start=%d seconds=%.0f rate=%.2f s/place learned=%.2f",
-                           start_place, (double)seconds, (double)rate, (double)g_seconds_per_place);
-        }
+        GfnProvider provider;
+        provider_active(&provider);
+        float guessed = 0.0f;
+        const bool had = queue_eta_expected(provider.code, start_place, &guessed);
+        queue_eta_learn(provider.code, start_place, seconds);
+        diagnostic_log("QUEUE", "finished start=%d seconds=%.0f provider=%s estimate=%.0f", start_place,
+                       (double)seconds, provider.code, had ? (double)guessed : -1.0);
     }
     queued_at = 0;
     start_place = 0;
@@ -1612,6 +1785,7 @@ static void track_session(void)
     char shot[64];
     const int shot_result = screenshot_poll(shot, sizeof(shot));
     if (shot_result > 0) {
+        gallery_mark_dirty();
         sfx_play(SFX_SCREENSHOT);
         char text[96];
         snprintf(text, sizeof(text), "Screenshot saved: %s", shot);
@@ -2197,6 +2371,75 @@ static void stats_tick(void)
     if (submit_job(NET_JOB_SEND_STATS, NULL, NULL, NULL)) g_stats_inflight = true;
 }
 
+/* Libraries saved before beta.30 have no wide art (shortcut banners), and
+ * nobody presses Y to refresh: do it once, quietly, when the menus are idle. */
+static bool g_library_upgrade;
+static u64 g_shortcut_launch_at;
+
+static void library_upgrade_tick(void)
+{
+    if (!g_library_upgrade) return;
+    if (!gfn_has_session(&g_client) || g_client.game_count == 0) {
+        g_library_upgrade = false;
+        return;
+    }
+    if (g_app.view != VIEW_LIBRARY || net_worker_busy() || g_deferred.set || g_app.modal != MODAL_NONE ||
+        g_app.search_text[0] || gfn_session_active(&g_client) || g_shortcut_launch_at || g_app.whats_new_open ||
+        g_app.guide_page >= 0)
+        return;
+    g_library_upgrade = false;
+    diagnostic_log("APP", "refreshing a library saved without wide art");
+    load_library();
+}
+
+/* A shortcut's art is drawn (shortcut_frame); then the worker installs it. */
+static void shortcut_tick(void)
+{
+    /* Drawing gave up (no video memory, no template): say why. It can fail
+     * in the same loop it started, so ask, don't watch the state. */
+    const char *failure = shortcut_take_failure();
+    if (failure && g_app.shortcut_sheet == SHORTCUT_SHEET_WORKING) {
+        snprintf(g_app.shortcut_message, sizeof(g_app.shortcut_message), "%s", failure);
+        g_app.shortcut_sheet = SHORTCUT_SHEET_FAILED;
+        sfx_play(SFX_ERROR);
+    } else if (failure) {
+        show_notice(failure);
+    }
+    const ShortcutState now = shortcut_state();
+    if ((now == SHORTCUT_READY || now == SHORTCUT_FETCH) && !net_worker_busy() && !g_deferred.set)
+        submit_job(NET_JOB_SHORTCUT, NULL, NULL, NULL);
+}
+
+/* Opened from a shortcut: launch its game as soon as Kasumi is ready (signed
+ * in, the start-up checks done, nothing on screen asking first). */
+static GfnGame g_shortcut_game;
+static unsigned g_shortcut_variant;
+static u64 g_shortcut_launch_at;
+
+static void shortcut_launch_tick(void)
+{
+    if (!g_shortcut_launch_at) return;
+    if (gfn_session_active(&g_client) || osGetTime() - g_shortcut_launch_at > 60000) {
+        /* A game already running (resumed at start-up), or it never got ready. */
+        diagnostic_log("SHORTCUT", "launch of %.60s dropped", g_shortcut_game.title);
+        g_shortcut_launch_at = 0;
+        return;
+    }
+    if (!gfn_has_session(&g_client)) {
+        if (g_client.auth_state == GFN_AUTH_LOGGED_OUT || g_client.auth_state == GFN_AUTH_ERROR) {
+            show_notice("Sign in to Kasumi first, then open the shortcut again");
+            g_shortcut_launch_at = 0;
+        }
+        return;
+    }
+    if (net_worker_busy() || g_deferred.set || g_app.modal != MODAL_NONE || g_app.guide_page >= 0 ||
+        g_app.update_open || (g_app.view != VIEW_LIBRARY && g_app.view != VIEW_DETAILS))
+        return;
+    g_shortcut_launch_at = 0;
+    diagnostic_log("SHORTCUT", "launching %.60s", g_shortcut_game.title);
+    launch_with_options(&g_shortcut_game, g_shortcut_variant);
+}
+
 /* The NVIDIA login is renewed ten minutes before it runs out, during a game
  * too. A long game used to outlast it and the renewal at its end could be
  * refused: "it logged me out" after quitting from the game's own menu. */
@@ -2450,6 +2693,20 @@ static void finish_jobs(void)
         g_current_game = g_client.resume_game;
         open_modal(MODAL_RESUME, "再開", "RESUME YOUR GAME?", text);
     }
+    /* The first job only fetched the art; drawing comes next. */
+    if (result.kind == NET_JOB_SHORTCUT && shortcut_state() != SHORTCUT_DRAWING &&
+        shortcut_state() != SHORTCUT_FETCH) {
+        if (result.ok) {
+            g_app.shortcut_sheet = shortcut_removing() ? SHORTCUT_SHEET_REMOVED : SHORTCUT_SHEET_ADDED;
+            sfx_play(SFX_QUEUE_READY);
+        } else {
+            snprintf(g_app.shortcut_message, sizeof(g_app.shortcut_message), "%s",
+                     shortcut_result()[0] ? shortcut_result() : "The installer didn't finish.");
+            g_app.shortcut_sheet = SHORTCUT_SHEET_FAILED;
+            sfx_play(SFX_ERROR);
+        }
+        shortcut_job_done();
+    }
     if (result.kind == NET_JOB_SEND_STATS) {
         g_stats_inflight = false;
         g_stats_failed = !result.ok;
@@ -2507,6 +2764,7 @@ typedef struct {
     bool settings_open, details_open, options_open, mapping_open, update_open, whats_new_open;
     bool stream_menu, controls_open, guide_open;
     int library_tab, setting_index, options_index, stream_menu_index, guide_page, mapping_input;
+    int settings_section, settings_grid;
     size_t selected;
     unsigned details_variant;
     bool busy;
@@ -2529,6 +2787,8 @@ static void ui_state(UiState *s)
     s->guide_open = g_app.guide_page >= 0;
     s->library_tab = g_app.library_tab;
     s->setting_index = g_app.setting_index;
+    s->settings_section = g_app.settings_section;
+    s->settings_grid = g_app.settings_grid;
     s->options_index = g_app.options_index;
     s->stream_menu_index = g_app.stream_menu_index;
     s->guide_page = g_app.guide_page;
@@ -2579,6 +2839,8 @@ static void ui_sounds(u32 down, AppAction action)
         sound = SFX_OPEN;
     } else if (closed) {
         sound = back ? SFX_BACK : SFX_CLOSE;
+    } else if (now.settings_section != was->settings_section) {
+        sound = now.settings_section >= 0 ? SFX_OPEN : SFX_BACK;
     } else if (now.library_tab != was->library_tab) {
         sound = SFX_TAB;
     } else if (memcmp(&now.settings, &was->settings, sizeof(now.settings))) {
@@ -2586,6 +2848,7 @@ static void ui_sounds(u32 down, AppAction action)
                            action == ACTION_MAP_PREV || action == ACTION_VARIANT_PREV;
         sound = lower ? SFX_TOGGLE_OFF : SFX_TOGGLE_ON;
     } else if (now.selected != was->selected || now.setting_index != was->setting_index ||
+               now.settings_grid != was->settings_grid ||
                now.options_index != was->options_index || now.stream_menu_index != was->stream_menu_index ||
                now.guide_page != was->guide_page || now.mapping_input != was->mapping_input ||
                now.details_variant != was->details_variant) {
@@ -2704,8 +2967,12 @@ int main(int argc, char **argv)
     webrtc_transport_init(&g_transport);
     gfn_client_init(&g_client);
     /* The saved library appears instantly; covers keep filling in behind. */
-    if (gfn_has_session(&g_client) && gfn_library_load(&g_client))
+    if (gfn_has_session(&g_client) && gfn_library_load(&g_client)) {
         game_art_prefetch(g_client.games, (unsigned)g_client.game_count);
+        g_library_upgrade = true;
+        for (size_t i = 0; i < g_client.game_count && g_library_upgrade; ++i)
+            if (g_client.games[i].wide_url[0]) g_library_upgrade = false;
+    }
     if (!gfn_input_self_test()) {
         diagnostic_log("INPUT", "wire encoder self-test FAILED");
         show_notice("Input packet self-test failed");
@@ -2728,6 +2995,14 @@ int main(int argc, char **argv)
                                g_whats_new_notes, sizeof(g_whats_new_notes))) {
         g_app.whats_new_open = true;
         g_app.whats_new_notes = g_whats_new_notes;
+    }
+    /* Opened from a game's HOME Menu shortcut: launch it once signed in. */
+    if (shortcut_take_launch(&g_shortcut_game, &g_shortcut_variant)) {
+        g_shortcut_launch_at = osGetTime();
+        g_app.whats_new_open = false;
+        char text[128];
+        snprintf(text, sizeof(text), "Starting %.90s...", g_shortcut_game.title);
+        show_notice(text);
     }
     aptHook(&g_apt_cookie, apt_hook, NULL);
     queue_alert_stop();
@@ -2796,6 +3071,9 @@ int main(int argc, char **argv)
             stats_tick();
         }
         keep_login_tick();
+        shortcut_tick();
+        shortcut_launch_tick();
+        library_upgrade_tick();
         if (g_app.whats_new_open && g_app.view != VIEW_STREAM) {
             handle_whats_new(down, repeat, action);
         } else if (g_app.guide_page >= 0 && g_app.view != VIEW_STREAM && !g_app.busy) {
@@ -2878,6 +3156,7 @@ int main(int argc, char **argv)
         if (draw_bottom) last_bottom_draw = now;
         was_touching = g_app.touching;
         if (g_app.view != VIEW_STREAM) game_art_pump();
+        if (g_app.gallery_open) gallery_pump();
         render(draw_bottom);
         /* While streaming, don't wait for vblank: sleep inside poll() on the
          * media socket so a video frame is decoded the moment its packets

@@ -54,13 +54,26 @@ typedef enum {
     UI_IMAGE_SEAL_16,
     UI_IMAGE_LANTERN,
     UI_IMAGE_DISCORD,
+    /* Settings sections, in section order (white, tinted when drawn). */
+    UI_IMAGE_SEC_CONTROLS,
+    UI_IMAGE_SEC_PICTURE,
+    UI_IMAGE_SEC_SOUND,
+    UI_IMAGE_SEC_NETWORK,
+    UI_IMAGE_SEC_SYSTEM,
+    UI_IMAGE_SEC_ACCOUNT,
+    /* A game without cover art (96x128). */
+    UI_IMAGE_NO_COVER,
+    /* The lower screen's backdrop tile: dots every 16 px, a cross every 32. */
+    UI_IMAGE_GRID,
     UI_IMAGE_COUNT
 } UiImage;
 
 bool ui_init(void);
 void ui_exit(void);
 
+/* Each theme: an accent colour and a wallpaper for the lower screen. */
 typedef enum { UI_THEME_SEIJI, UI_THEME_SAKURA, UI_THEME_KIN, UI_THEME_AI, UI_THEME_FUJI,
+               UI_THEME_BENI, UI_THEME_MATCHA, UI_THEME_KAKI, UI_THEME_SUMI, UI_THEME_SHIRO,
                UI_THEME_COUNT } UiTheme;
 void ui_set_theme(UiTheme theme);
 const char *ui_theme_name(UiTheme theme);
@@ -79,7 +92,13 @@ void ui_begin_bottom(void);
  * lands exactly between each pair of rows and averages them. */
 bool ui_video_upload(const void *surface);
 void ui_begin_top_video(void);
+/* Classic (400-column) video: the decoder writes the visible top buffer,
+ * so it must be single-buffered. Menus double-buffer it again. */
+void ui_top_classic_video(void);
 void ui_draw_video(void);
+/* The picture filter for wide video, done on the GPU while drawing:
+ * sharpening 0 (off) ... 3 and colour 0 (natural) ... 2. */
+void ui_set_video_look(unsigned sharpen, unsigned color);
 /* Milliseconds since ui_init, for animation. */
 u64 ui_ticks(void);
 /* Seconds since the previous frame (clamped to 0.1 s), so animation speed
@@ -95,6 +114,11 @@ float ui_ease_out(float t);
 void ui_offset(float dx, float dy);
 
 bool ui_image(UiImage image, float x, float y, float scale, float alpha);
+/* A tiling texture (UI_IMAGE_GRID) over a rect in one colour, anchored to
+ * the screen so it lines up wherever it is drawn. */
+void ui_texture(UiImage image, float x, float y, float w, float h, u32 color);
+/* A white image drawn in one colour (its alpha kept). */
+bool ui_image_tint(UiImage image, float x, float y, float scale, u32 color);
 /* Rotated about its centre (cx, cy). */
 bool ui_image_rotated(UiImage image, float cx, float cy, float scale, float angle, float alpha);
 
@@ -151,6 +175,16 @@ void ui_hint_row(float center_x, float y, const char *const *pairs);
 
 typedef enum { UI_BUTTON_NORMAL, UI_BUTTON_PRIMARY, UI_BUTTON_DANGER, UI_BUTTON_ACTIVE } UiButtonStyle;
 void ui_button(UiRect r, const char *label, const char *jp, UiButtonStyle style, bool pressed);
+/* The pressable key under every button: square, on a hard lip that the
+ * face sinks onto when pressed. Returns the face rect. */
+UiRect ui_key(UiRect r, UiButtonStyle style, bool pressed);
+/* A square box: 1 px border and corner marks (cards). On the lower screen
+ * over a wallpaper it is frosted glass instead of a solid fill. */
+void ui_surface(UiRect r, u32 border, u32 fill);
+/* The theme's wallpaper over the whole lower screen; false if none. */
+bool ui_backdrop(void);
+/* Frosted glass: the blurred wallpaper behind r (lower screen only). */
+bool ui_glass(UiRect r);
 bool ui_hit(UiRect r, int x, int y);
 
 /* PlayStation face symbols, drawn geometrically. */

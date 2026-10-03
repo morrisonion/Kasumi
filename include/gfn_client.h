@@ -32,6 +32,8 @@ typedef struct {
     char store[24];
     /* Box art on img.nvidiagrid.net (resized by the server on request). */
     char image_url[192];
+    /* Wide art (TV banner, key art or hero image), for shortcut banners. */
+    char wide_url[192];
     /* Every store this game can launch from; app_id/store above are the
      * one the account selected. */
     struct {

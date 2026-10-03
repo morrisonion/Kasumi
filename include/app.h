@@ -36,7 +36,13 @@ typedef enum {
     /* Another GeForce NOW session holds the slot: resume it or end it. */
     MODAL_CONFLICT,
     /* Waiting for NVIDIA to free the slot; the launch retries on a timer. */
-    MODAL_LIMIT_WAIT
+    MODAL_LIMIT_WAIT,
+    /* Take this game's shortcut off the HOME Menu? */
+    MODAL_SHORTCUT_REMOVE,
+    /* Signing in where a partner runs GeForce NOW: which account? */
+    MODAL_PROVIDER_PICK,
+    /* Delete the screenshot on screen? */
+    MODAL_DELETE_SHOT
 } AppModal;
 
 typedef enum {
@@ -76,6 +82,15 @@ typedef enum {
     ACTION_VARIANT_NEXT,
     ACTION_FAVOURITE,
     ACTION_OPTIONS,
+    /* Game page: add (or remove) its HOME Menu shortcut. */
+    ACTION_SHORTCUT,
+    /* Settings grid: a section tile (screens_touched_section). */
+    ACTION_SETTINGS_SECTION,
+    /* Screenshot viewer. */
+    ACTION_GALLERY_PREV,
+    ACTION_GALLERY_NEXT,
+    ACTION_GALLERY_DELETE,
+    ACTION_GALLERY_CLOSE,
     ACTION_OPTIONS_CLOSE,
     ACTION_OPTION_PREV,
     ACTION_OPTION_NEXT,
@@ -101,7 +116,8 @@ enum { SETTING_LAYOUT, SETTING_TRIGGERS, SETTING_DEADZONE, SETTING_POINTER,
        SETTING_CONNECTION, SETTING_NETWORK, SETTING_SERVER, SETTING_GUIDE, SETTING_REPORT, SETTING_SHARE, SETTING_SHARE_STATS,
        SETTING_UPDATES, SETTING_AUTO_UPDATE, SETTING_UPDATE_CHANNEL,
        SETTING_PROVIDER, SETTING_ACCOUNT, SETTING_COMMUNITY, SETTING_MUSIC, SETTING_VOICE, SETTING_SFX,
-       SETTING_CAMERA_SPEED, SETTING_CAMERA_INVERT, SETTING_COUNT };
+       SETTING_CAMERA_SPEED, SETTING_CAMERA_INVERT, SETTING_SCREENSHOTS,
+       SETTING_VIDEO_SHARPEN, SETTING_VIDEO_COLOR, SETTING_COUNT };
 
 /* Library tabs (L / R). */
 enum { LIBRARY_TAB_ALL, LIBRARY_TAB_FAVOURITES, LIBRARY_TAB_RECENT, LIBRARY_TAB_COUNT };
@@ -161,6 +177,12 @@ typedef struct {
     size_t list_top;
     /* Position in the grouped settings list (see screens_setting_at). */
     int setting_index;
+    /* Settings opens on a grid of sections (-1); then one section's list.
+     * settings_grid is the grid's highlighted tile. */
+    int settings_section;
+    int settings_grid;
+    /* The screenshot viewer, over Settings (gallery.h). */
+    bool gallery_open;
     char search_text[80];
 
     char game_title[96];
@@ -235,7 +257,20 @@ typedef struct {
     unsigned wifi_bars;
     unsigned battery_level;
     bool charging;
+
+    /* The HOME Menu shortcut sheet over the game page (SHORTCUT_SHEET_*):
+     * progress while it is made, then the result. */
+    int shortcut_sheet;
+    char shortcut_message[128];
 } App;
+
+enum {
+    SHORTCUT_SHEET_NONE,
+    SHORTCUT_SHEET_WORKING,
+    SHORTCUT_SHEET_ADDED,
+    SHORTCUT_SHEET_REMOVED,
+    SHORTCUT_SHEET_FAILED
+};
 
 /* The game at a position of the visible library list, or NULL. */
 static inline const GfnGame *app_game(const App *app, size_t position)
@@ -255,6 +290,13 @@ UiRect screens_stream_panel(void);
 /* Settings helpers shared by input handling and drawing. The settings list
  * is grouped into sections; positions map to SETTING_* ids. */
 int screens_setting_at(int position);
+int screens_section_count(void);
+/* The section a position is in, and a section's first position and size. */
+int screens_section_of(int position);
+int screens_section_first(int section);
+int screens_section_size(int section);
+/* The settings tile a tap landed on (with ACTION_SETTINGS_SECTION). */
+int screens_touched_section(void);
 void screens_setting_change(App *app, int setting, int direction);
 /* The options row a tap landed on (with ACTION_OPTION_PREV/NEXT). */
 int screens_touched_option_row(void);

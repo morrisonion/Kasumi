@@ -19,6 +19,7 @@
 //   GET  /api/stats?days=90            raw summaries as JSON (for dashboard.html)
 //   POST /launches                     anonymous launch records (how each launch ended)
 //   GET  /api/launches?days=90         launch records as JSON
+//   GET  /eta                          public: queue-time model per provider (Kasumi's wait estimate)
 //   GET  /api/reports                  report list as JSON
 // Read routes take the key as ?key= or an "X-Admin-Key" header, and allow
 // cross-origin reads so the local dashboard.html can use them.
@@ -44,6 +45,7 @@ export default {
       if (request.method === "GET" && url.pathname === "/api/reports") return await apiReports(url, env);
       if (request.method === "GET" && url.pathname === "/api/launches") return await apiLaunches(url, env);
       if (request.method === "POST" && url.pathname === "/launches") return await submitLaunches(request, env);
+      if (request.method === "GET" && url.pathname === "/eta") return await queueEta(env);
       if (request.method === "POST" && url.pathname === "/report") return await submit(request, env);
       if (request.method === "GET" && url.pathname === "/reports") return await list(url, env);
       if (request.method === "POST" && url.pathname === "/stats") return await submitStats(request, env);
@@ -369,6 +371,59 @@ async function apiLaunches(url, env) {
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor && rows.length < 10000);
   return json({ days, rows });
+}
+
+// ---- Queue wait estimate --------------------------------------------------
+//
+// Public and anonymous: per provider, how long the queue takes as
+// base + perPlace * starting place, from the last 14 days of finished
+// queues. Beta.29 data: NVIDIA's free queue took ~133 s whatever the place
+// (1 or 131), so a seconds-per-place guess was badly off. Cached an hour.
+
+const ETA_DAYS = 14;
+const ETA_MIN_SAMPLES = 5;
+
+async function queueEta(env) {
+  const cached = await env.REPORTS.get("eta:cache");
+  if (cached) return new Response(cached, { headers: { "content-type": "application/json", "cache-control": "max-age=1800" } });
+  const since = Date.now() - ETA_DAYS * 86400000;
+  const groups = {};
+  let cursor;
+  let seen = 0;
+  do {
+    const page = await env.REPORTS.list({ prefix: "l:", limit: 1000, cursor });
+    for (const k of page.keys) {
+      const r = k.metadata;
+      if (!r || r.t < since) continue;
+      ++seen;
+      if (r.o !== "ok" || !(r.q > 0) || !(r.qp > 0) || !r.pv) continue;
+      (groups[r.pv] = groups[r.pv] || []).push([r.qp, r.q]);
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor && seen < 20000);
+  const providers = {};
+  for (const [pv, rows] of Object.entries(groups)) {
+    if (rows.length < ETA_MIN_SAMPLES) continue;
+    // Least squares on q = base + perPlace * place, per place never negative.
+    const n = rows.length;
+    const mx = rows.reduce((a, r) => a + r[0], 0) / n;
+    const my = rows.reduce((a, r) => a + r[1], 0) / n;
+    let cov = 0, vx = 0;
+    for (const [x, y] of rows) { cov += (x - mx) * (y - my); vx += (x - mx) * (x - mx); }
+    let perPlace = vx > 0 ? Math.max(0, cov / vx) : 0;
+    let base = my - perPlace * mx;
+    if (base < 0) { base = 0; perPlace = my / mx; }
+    const sorted = rows.map((r) => r[1]).sort((a, b) => a - b);
+    providers[pv] = {
+      base: Math.round(base * 10) / 10,
+      perPlace: Math.round(perPlace * 1000) / 1000,
+      median: sorted[Math.floor(n / 2)],
+      n,
+    };
+  }
+  const body = JSON.stringify({ updated: new Date().toISOString(), days: ETA_DAYS, providers });
+  await env.REPORTS.put("eta:cache", body, { expirationTtl: 3600 });
+  return new Response(body, { headers: { "content-type": "application/json", "cache-control": "max-age=1800" } });
 }
 
 async function loadStats(env, max = 5000) {

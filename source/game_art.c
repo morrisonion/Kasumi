@@ -102,8 +102,12 @@ void game_art_init(void)
     check_cache_version();
 }
 
+static void free_retired(void);
+
 void game_art_exit(void)
 {
+    free_retired();
+    free_retired();
     LightLock_Lock(&g_lock);
     for (int i = 0; i < ART_SLOTS; ++i) {
         if (g_slots[i].state == ART_READY) C3D_TexDelete(&g_slots[i].tex);
@@ -112,6 +116,28 @@ void game_art_exit(void)
         g_slots[i].state = ART_FREE;
     }
     LightLock_Unlock(&g_lock);
+}
+
+/* A cover's texture is replaced while a frame is being drawn (the UI
+ * wants a new cover and the slots are full), and the GPU may still draw it
+ * for a frame or two. Freed at once, its memory could hold the next cover
+ * while the old draw still read it. Kept two pumps (one full frame) first. */
+#define RETIRE_MAX ART_SLOTS
+static C3D_Tex g_retire_new[RETIRE_MAX], g_retire_old[RETIRE_MAX];
+static int g_retire_new_count, g_retire_old_count;
+
+static void retire_texture(const C3D_Tex *tex)
+{
+    if (g_retire_new_count < RETIRE_MAX) g_retire_new[g_retire_new_count++] = *tex;
+    else C3D_TexDelete((C3D_Tex *)tex);
+}
+
+static void free_retired(void)
+{
+    for (int i = 0; i < g_retire_old_count; ++i) C3D_TexDelete(&g_retire_old[i]);
+    memcpy(g_retire_old, g_retire_new, sizeof(g_retire_new[0]) * (size_t)g_retire_new_count);
+    g_retire_old_count = g_retire_new_count;
+    g_retire_new_count = 0;
 }
 
 static ArtSlot *find(const char *key)
@@ -137,7 +163,7 @@ void game_art_want(const GfnGame *game)
                 (!slot || s->used_at < slot->used_at)) slot = s;
         }
         if (slot) {
-            if (slot->state == ART_READY) C3D_TexDelete(&slot->tex);
+            if (slot->state == ART_READY) retire_texture(&slot->tex);
             memset(slot, 0, sizeof(*slot));
             slot->state = ART_WANTED;
             snprintf(slot->key, sizeof(slot->key), "%s", game->app_id);
@@ -155,6 +181,7 @@ void game_art_want(const GfnGame *game)
 
 void game_art_pump(void)
 {
+    free_retired();
     for (int i = 0; i < ART_SLOTS; ++i) {
         ArtSlot *slot = &g_slots[i];
         LightLock_Lock(&g_lock);
@@ -183,6 +210,8 @@ void game_art_pump(void)
                                     GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                     GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                     GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+            /* Nothing of the old contents may linger in the CPU's cache. */
+            GSPGPU_InvalidateDataCache(slot->tex.data, slot->tex.size);
             C3D_TexSetFilter(&slot->tex, GPU_LINEAR, GPU_LINEAR);
             C3D_TexSetWrap(&slot->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
             slot->subtex.width = GAME_ART_WIDTH;

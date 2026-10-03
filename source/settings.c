@@ -20,11 +20,13 @@ void settings_defaults(AppSettings *settings)
     settings->wide_video = true;
     settings->bitrate_mode = STREAM_BITRATE_ADAPTIVE;
     settings->sharpen = false;
+    settings->video_sharpen = 1;
+    settings->video_color = 1;
     settings->gyro_mode = GFN_GYRO_OFF;
     settings->gyro_speed = 1;
     settings->camera_speed = 1;
     settings->camera_invert = 0;
-    settings->theme = 0;
+    settings->theme = UI_THEME_AI; /* indigo: the default look since beta.30 */
     settings->volume = 5;
     settings->mute_in_menus = false;
     settings->music_mode = 0; /* MENU_MUSIC_ON */
@@ -88,6 +90,8 @@ bool settings_load(AppSettings *settings)
     settings->bitrate_mode = (StreamBitrateMode)read_int(root, "bitrate66", settings->bitrate_mode,
                                                          STREAM_BITRATE_COUNT);
     settings->sharpen = read_bool(root, "sharpen", settings->sharpen);
+    settings->video_sharpen = (unsigned)read_int(root, "video_sharpen", (int)settings->video_sharpen, 4);
+    settings->video_color = (unsigned)read_int(root, "video_color", (int)settings->video_color, 3);
     settings->gyro_mode = (GfnGyroMode)read_int(root, "gyro_mode", settings->gyro_mode,
                                                 GFN_GYRO_MODE_COUNT);
     settings->gyro_speed = (unsigned)read_int(root, "gyro_speed", (int)settings->gyro_speed, 3);
@@ -156,6 +160,8 @@ bool settings_save(const AppSettings *settings)
     if (!root) return false;
     json_object_set_new(root, "camera_speed", json_integer((json_int_t)settings->camera_speed));
     json_object_set_new(root, "camera_invert", json_integer((json_int_t)settings->camera_invert));
+    json_object_set_new(root, "video_sharpen", json_integer((json_int_t)settings->video_sharpen));
+    json_object_set_new(root, "video_color", json_integer((json_int_t)settings->video_color));
     const bool ok = json_dump_file(root, SETTINGS_PATH, JSON_INDENT(2)) == 0;
     json_decref(root);
     return ok;
@@ -168,6 +174,7 @@ void settings_apply_picture(const AppSettings *settings)
     stream_profile_set_weak(settings->net_weak);
     regions_set_choice(settings->server);
     ui_set_theme((UiTheme)settings->theme);
+    ui_set_video_look(settings->video_sharpen, settings->video_color);
     audio_output_set_volume((float)settings->volume / 5.0f);
 }
 

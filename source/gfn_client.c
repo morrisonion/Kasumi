@@ -644,7 +644,7 @@ static bool fetch_catalog(GfnClient *client, const char *search_query, bool owne
      * requested and checked here too. Build 67 only relied on the server
      * filter and sorted by catalog relevance, so games that were never added
      * to the account showed up as "library". */
-    #define APP_FIELDS "items{id title images{GAME_BOX_ART KEY_ART TV_BANNER} " \
+    #define APP_FIELDS "items{id title images{GAME_BOX_ART KEY_ART TV_BANNER HERO_IMAGE} " \
         "variants{id appStore gfn{library{status selected lastPlayedDate}}}}" \
         "pageInfo{hasNextPage endCursor totalCount}"
     static const char *browse_query =
@@ -773,6 +773,15 @@ static bool fetch_catalog(GfnClient *client, const char *search_query, bool owne
             if (json_is_string(image) && json_string_value(image)[0])
                 snprintf(game->image_url, sizeof(game->image_url), "%s", json_string_value(image));
         }
+        /* Wide art for HOME Menu shortcut banners: the TV banner usually
+         * carries the game's logo; key art and hero images may not. */
+        static const char *const wide_keys[] = { "TV_BANNER", "KEY_ART", "HERO_IMAGE" };
+        for (size_t k = 0; k < 3 && !game->wide_url[0]; ++k) {
+            json_t *image = json_is_object(images) ? json_object_get(images, wide_keys[k]) : NULL;
+            if (json_is_array(image)) image = json_array_get(image, 0);
+            if (json_is_string(image) && json_string_value(image)[0])
+                snprintf(game->wide_url, sizeof(game->wide_url), "%s", json_string_value(image));
+        }
         ++client->game_count;
     }
     json_t *next = json_is_object(page_info) ? json_object_get(page_info, "hasNextPage") : NULL;
@@ -817,9 +826,9 @@ static void library_save(const GfnClient *client)
         json_t *variants = json_array();
         for (unsigned v = 0; v < g->variant_count; ++v)
             json_array_append_new(variants, json_pack("[s,s]", g->variants[v].id, g->variants[v].store));
-        json_array_append_new(games, json_pack("{s:s,s:s,s:s,s:s,s:o,s:i}", "title", g->title,
+        json_array_append_new(games, json_pack("{s:s,s:s,s:s,s:s,s:s,s:o,s:i}", "title", g->title,
                                                "id", g->app_id, "store", g->store,
-                                               "image", g->image_url, "variants", variants,
+                                               "image", g->image_url, "wide", g->wide_url, "variants", variants,
                                                "selected", (int)g->variant_selected));
     }
     json_t *root = json_pack("{s:I,s:o}", "saved_at", (json_int_t)client->library_saved_at,
@@ -847,6 +856,7 @@ bool gfn_library_load(GfnClient *client)
         copy_json_string(g->app_id, sizeof(g->app_id), item, "id");
         copy_json_string(g->store, sizeof(g->store), item, "store");
         copy_json_string(g->image_url, sizeof(g->image_url), item, "image");
+        copy_json_string(g->wide_url, sizeof(g->wide_url), item, "wide");
         json_t *variants = json_object_get(item, "variants");
         size_t v; json_t *pair;
         json_array_foreach(variants, v, pair) {
@@ -999,7 +1009,7 @@ static char *build_session_body(const GfnGame *game, const char *device_id)
     json_set_null(features, "hidDevices");
     json_object_set_new(features, "chromaFormat", json_integer(0));
     /* Server-side sharpening spends scarce bits on edges and noise; off by
-     * default, like OpenNOW. Settings > Encoder filter brings it back. */
+     * default, like OpenNOW. Settings > Server sharpening brings it back. */
     json_object_set_new(features, "prefilterMode", json_integer(stream_profile_sharpen() ? 1 : 0));
     json_object_set_new(features, "prefilterSharpness", json_integer(stream_profile_sharpen() ? 50 : 0));
     json_object_set_new(features, "prefilterNoiseReduction", json_integer(0));
@@ -1422,10 +1432,14 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
                  * DSZSUT, Spain) a partner is no answer: the account is. */
                 GfnProvider local;
                 providers_recommended(&local);
-                if (strcmp(local.code, PROVIDER_NVIDIA))
+                if (strcmp(local.code, PROVIDER_NVIDIA)) {
+                    char country[4];
+                    providers_country(country, sizeof(country));
                     snprintf(client->status, sizeof(client->status),
-                             "This account can't stream here. If %.20s sold you GeForce NOW, pick it in "
-                             "Settings > Account and sign in again (code %d).", local.name, status_code);
+                             "This account can't stream in %.20s. If %.20s sold you GeForce NOW, pick it in "
+                             "Settings > Account and sign in again (code %d).", providers_country_name(country),
+                             local.name, status_code);
+                }
                 else
                     snprintf(client->status, sizeof(client->status),
                              "NVIDIA says this account can't play this game. Steam, Epic and Ubisoft games "

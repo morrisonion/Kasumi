@@ -37,6 +37,14 @@ bool providers_get(unsigned index, GfnProvider *out);
 bool providers_find(const char *code, GfnProvider *out);
 /* NVIDIA's recommendation for this country (NVIDIA when unknown). */
 void providers_recommended(GfnProvider *out);
+/* The country NVIDIA sees from this console's internet address ("AU"),
+ * and its name for messages ("Australia", or the code itself). */
+void providers_country(char *out, size_t size);
+const char *providers_country_name(const char *code);
+/* A partner runs GeForce NOW here (true: fills it in). `only` is set when
+ * NVIDIA doesn't serve this country itself (Australia), so most accounts
+ * there are the partner's; otherwise both sell it. */
+bool providers_partner_here(GfnProvider *partner, bool *only);
 
 /* The provider of the signed-in account (NVIDIA when none is saved). */
 void provider_set_active(const GfnProvider *provider);

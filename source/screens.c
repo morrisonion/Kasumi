@@ -8,6 +8,8 @@
 
 #include "game_art.h"
 #include "game_prefs.h"
+#include "shortcut.h"
+#include "gallery.h"
 #include "menu_audio.h"
 #include "updater.h"
 #include "mvd_video.h"
@@ -51,6 +53,13 @@ static const UiRect SINGLE = { 60, 186, 200, 44 };
 static const UiRect SET_PREV = { 16, 188, 60, 44 };
 static const UiRect SET_BACK = { 84, 188, 152, 44 };
 static const UiRect SET_NEXT = { 244, 188, 60, 44 };
+/* Settings grid: three by two section tiles. */
+static UiRect set_tile(int i)
+{
+    return (UiRect){ 16.0f + (float)(i % 3) * 98.0f, 34.0f + (float)(i / 3) * 76.0f, 92.0f, 70.0f };
+}
+static int g_touched_section = -1;
+int screens_touched_section(void) { return g_touched_section; }
 
 /* Stream. */
 static const UiRect STR_L3 = { 6, 30, 56, 156 };
@@ -71,6 +80,7 @@ static const UiRect DET_STORE_PREV = { 16, 106, 44, 44 };
 static const UiRect DET_STORE_NEXT = { 260, 106, 44, 44 };
 static const UiRect DET_FAV = { 16, 188, 92, 44 };
 static const UiRect DET_OPTIONS = { 114, 188, 92, 44 };
+static const UiRect DET_SHORTCUT = { 16, 158, 288, 24 };
 static const UiRect DET_BACK = { 212, 188, 92, 44 };
 static const UiRect OPT_CLOSE = { 246, 3, 64, 30 };
 #define OPT_ROW_Y 39.0f
@@ -179,6 +189,8 @@ typedef struct {
     const char *en;
 } SettingEntry;
 
+/* Six sections; Settings opens on a grid of them (33 settings in one list
+ * was a long scroll on a 3DS). A header starts each section. */
 static const SettingEntry SETTING_ENTRIES[] = {
     { -1, "操作", "CONTROLS" },
     { SETTING_LAYOUT, NULL, NULL },
@@ -188,19 +200,21 @@ static const SettingEntry SETTING_ENTRIES[] = {
     { SETTING_CAMERA_INVERT, NULL, NULL },
     { SETTING_GYRO, NULL, NULL },
     { SETTING_GYRO_SPEED, NULL, NULL },
+    { SETTING_POINTER, NULL, NULL },
     { SETTING_FAST_INPUT, NULL, NULL },
     { -1, "画質", "PICTURE" },
     { SETTING_RESOLUTION, NULL, NULL },
     { SETTING_BITRATE, NULL, NULL },
+    { SETTING_VIDEO_SHARPEN, NULL, NULL },
+    { SETTING_VIDEO_COLOR, NULL, NULL },
     { SETTING_FILTER, NULL, NULL },
     { SETTING_STATS, NULL, NULL },
-    { -1, "音声", "AUDIO" },
+    { -1, "音と色", "SOUND & LOOK" },
     { SETTING_VOLUME, NULL, NULL },
     { SETTING_MENU_AUDIO, NULL, NULL },
     { SETTING_MUSIC, NULL, NULL },
     { SETTING_VOICE, NULL, NULL },
     { SETTING_SFX, NULL, NULL },
-    { -1, "外観", "APPEARANCE" },
     { SETTING_THEME, NULL, NULL },
     { -1, "接続", "NETWORK" },
     { SETTING_CONNECTION, NULL, NULL },
@@ -208,21 +222,77 @@ static const SettingEntry SETTING_ENTRIES[] = {
     { SETTING_SERVER, NULL, NULL },
     { -1, "本体", "SYSTEM" },
     { SETTING_LID, NULL, NULL },
-    { SETTING_POINTER, NULL, NULL },
     { SETTING_GUIDE, NULL, NULL },
     { SETTING_SHARE, NULL, NULL },
     { SETTING_SHARE_STATS, NULL, NULL },
     { SETTING_REPORT, NULL, NULL },
+    { SETTING_SCREENSHOTS, NULL, NULL },
     { SETTING_COMMUNITY, NULL, NULL },
-    { -1, "更新", "UPDATES" },
+    { -1, "アカウント", "ACCOUNT & UPDATES" },
     { SETTING_UPDATES, NULL, NULL },
     { SETTING_AUTO_UPDATE, NULL, NULL },
     { SETTING_UPDATE_CHANNEL, NULL, NULL },
-    { -1, "アカウント", "ACCOUNT" },
     { SETTING_PROVIDER, NULL, NULL },
     { SETTING_ACCOUNT, NULL, NULL },
 };
+
+/* Each section's tile: one kanji in an ensō, and what is inside. */
+static const struct { const char *kanji, *summary; } SECTION_INFO[] = {
+    { "操", "Buttons, sticks, camera, gyro, mouse" },
+    { "画", "Screen mode, bitrate, sharpness, colour" },
+    { "音", "Volume, music, voice, sounds, theme" },
+    { "網", "Connection check, type, server" },
+    { "本", "Lid, guide, screenshots, reports" },
+    { "鍵", "Updates, provider, sign out" },
+};
 #define SETTING_ENTRY_COUNT (int)(sizeof(SETTING_ENTRIES) / sizeof(SETTING_ENTRIES[0]))
+
+/* The header entry of a section (NULL past the end). */
+static const SettingEntry *section_header(int section)
+{
+    int seen = -1;
+    for (int i = 0; i < SETTING_ENTRY_COUNT; ++i)
+        if (SETTING_ENTRIES[i].setting < 0 && ++seen == section) return &SETTING_ENTRIES[i];
+    return NULL;
+}
+
+int screens_section_count(void)
+{
+    int count = 0;
+    for (int i = 0; i < SETTING_ENTRY_COUNT; ++i) count += SETTING_ENTRIES[i].setting < 0;
+    return count;
+}
+
+int screens_section_of(int position)
+{
+    int section = -1, seen = 0;
+    for (int i = 0; i < SETTING_ENTRY_COUNT; ++i) {
+        if (SETTING_ENTRIES[i].setting < 0) ++section;
+        else if (seen++ == position) return section;
+    }
+    return 0;
+}
+
+int screens_section_first(int section)
+{
+    int current = -1, seen = 0;
+    for (int i = 0; i < SETTING_ENTRY_COUNT; ++i) {
+        if (SETTING_ENTRIES[i].setting < 0) { ++current; continue; }
+        if (current == section) return seen;
+        ++seen;
+    }
+    return 0;
+}
+
+int screens_section_size(int section)
+{
+    int current = -1, count = 0;
+    for (int i = 0; i < SETTING_ENTRY_COUNT; ++i) {
+        if (SETTING_ENTRIES[i].setting < 0) ++current;
+        else if (current == section) ++count;
+    }
+    return count;
+}
 
 int screens_setting_at(int position)
 {
@@ -239,7 +309,8 @@ static const char *const SETTING_LABELS[SETTING_COUNT] = {
     [SETTING_DEADZONE] = "Stick deadzone", [SETTING_POINTER] = "Mouse mode at start",
     [SETTING_STATS] = "Stream stats", [SETTING_FAST_INPUT] = "Fast input",
     [SETTING_RESOLUTION] = "Screen mode", [SETTING_BITRATE] = "Bitrate",
-    [SETTING_FILTER] = "Encoder filter", [SETTING_GYRO] = "Gyro aim",
+    [SETTING_FILTER] = "Server sharpening", [SETTING_GYRO] = "Gyro aim",
+    [SETTING_VIDEO_SHARPEN] = "Sharpness", [SETTING_VIDEO_COLOR] = "Colour",
     [SETTING_GYRO_SPEED] = "Gyro speed", [SETTING_ACCOUNT] = "NVIDIA account",
     [SETTING_CAMERA_SPEED] = "Camera stick speed", [SETTING_CAMERA_INVERT] = "Invert camera",
     [SETTING_THEME] = "Theme", [SETTING_VOLUME] = "Stream volume",
@@ -247,7 +318,7 @@ static const char *const SETTING_LABELS[SETTING_COUNT] = {
     [SETTING_CONNECTION] = "Connection check", [SETTING_GUIDE] = "Getting started",
     [SETTING_NETWORK] = "Connection type", [SETTING_SERVER] = "Server",
     [SETTING_REPORT] = "Send diagnostic report", [SETTING_SHARE] = "Share problem reports",
-    [SETTING_SHARE_STATS] = "Share performance stats", [SETTING_COMMUNITY] = "Kasumi Discord",
+    [SETTING_SHARE_STATS] = "Share performance stats", [SETTING_COMMUNITY] = "Kasumi Discord", [SETTING_SCREENSHOTS] = "Screenshots",
     [SETTING_MUSIC] = "Menu music", [SETTING_VOICE] = "Voice", [SETTING_SFX] = "Sound effects",
     [SETTING_UPDATES] = "Software update", [SETTING_AUTO_UPDATE] = "Check automatically",
     [SETTING_UPDATE_CHANNEL] = "Update channel", [SETTING_PROVIDER] = "GeForce NOW provider",
@@ -257,7 +328,8 @@ static const char *const SETTING_JP[SETTING_COUNT] = {
     [SETTING_DEADZONE] = "デッドゾーン", [SETTING_POINTER] = "ポインタ",
     [SETTING_STATS] = "統計", [SETTING_FAST_INPUT] = "高速入力",
     [SETTING_RESOLUTION] = "表示", [SETTING_BITRATE] = "ビットレート",
-    [SETTING_FILTER] = "補正", [SETTING_GYRO] = "ジャイロ",
+    [SETTING_FILTER] = "鋭化", [SETTING_GYRO] = "ジャイロ",
+    [SETTING_VIDEO_SHARPEN] = "鮮明", [SETTING_VIDEO_COLOR] = "色彩",
     [SETTING_GYRO_SPEED] = "感度", [SETTING_ACCOUNT] = "アカウント",
     [SETTING_CAMERA_SPEED] = "カメラ速度", [SETTING_CAMERA_INVERT] = "カメラ反転",
     [SETTING_THEME] = "色", [SETTING_VOLUME] = "音量",
@@ -265,7 +337,7 @@ static const char *const SETTING_JP[SETTING_COUNT] = {
     [SETTING_CONNECTION] = "接続", [SETTING_GUIDE] = "案内",
     [SETTING_NETWORK] = "回線", [SETTING_SERVER] = "サーバー",
     [SETTING_REPORT] = "報告", [SETTING_SHARE] = "協力", [SETTING_SHARE_STATS] = "統計",
-    [SETTING_COMMUNITY] = "仲間", [SETTING_MUSIC] = "音楽", [SETTING_VOICE] = "声", [SETTING_SFX] = "効果音",
+    [SETTING_COMMUNITY] = "仲間", [SETTING_SCREENSHOTS] = "写真", [SETTING_MUSIC] = "音楽", [SETTING_VOICE] = "声", [SETTING_SFX] = "効果音",
     [SETTING_UPDATES] = "更新", [SETTING_AUTO_UPDATE] = "自動確認",
     [SETTING_UPDATE_CHANNEL] = "チャンネル", [SETTING_PROVIDER] = "提供元",
 };
@@ -346,6 +418,8 @@ static unsigned setting_option(const App *app, int setting, unsigned *count)
     case SETTING_RESOLUTION: *count = 2; return s->wide_video ? 0 : 1;
     case SETTING_BITRATE: *count = STREAM_BITRATE_COUNT; return (unsigned)s->bitrate_mode;
     case SETTING_FILTER: *count = 2; return s->sharpen ? 1 : 0;
+    case SETTING_VIDEO_SHARPEN: *count = 4; return s->video_sharpen;
+    case SETTING_VIDEO_COLOR: *count = 3; return s->video_color;
     case SETTING_GYRO: *count = GFN_GYRO_MODE_COUNT; return (unsigned)s->gyro_mode;
     case SETTING_GYRO_SPEED: *count = 3; return s->gyro_speed;
     case SETTING_CAMERA_SPEED: *count = 4; return s->camera_speed;
@@ -386,7 +460,15 @@ static const char *setting_value(const App *app, int setting)
         };
         return names[s->bitrate_mode];
     }
-    case SETTING_FILTER: return s->sharpen ? "Sharpen" : "Clean";
+    case SETTING_FILTER: return s->sharpen ? "On" : "Off";
+    case SETTING_VIDEO_SHARPEN: {
+        static const char *const names[4] = { "Off", "Low", "Medium", "High" };
+        return names[s->video_sharpen < 4 ? s->video_sharpen : 0];
+    }
+    case SETTING_VIDEO_COLOR: {
+        static const char *const names[3] = { "Natural", "Vivid", "Extra vivid" };
+        return names[s->video_color < 3 ? s->video_color : 0];
+    }
     case SETTING_GYRO: return gyro_mode_name(s->gyro_mode);
     case SETTING_GYRO_SPEED: return s->gyro_speed == 0 ? "Low" : s->gyro_speed == 2 ? "High" : "Medium";
     case SETTING_CAMERA_SPEED:
@@ -429,6 +511,13 @@ static const char *setting_value(const App *app, int setting)
     }
     case SETTING_GUIDE: return "Open";
     case SETTING_COMMUNITY: return "Scan";
+    case SETTING_SCREENSHOTS: {
+        static char text[24];
+        const unsigned n = gallery_saved_count();
+        if (!n) return "None yet";
+        snprintf(text, sizeof(text), "%u saved", n);
+        return text;
+    }
     case SETTING_MUSIC:
         return s->music_mode == MENU_MUSIC_QUIET ? "Quiet" : s->music_mode == MENU_MUSIC_OFF ? "Off" : "On";
     case SETTING_VOICE: return s->voice_cues ? "On" : "Off";
@@ -496,10 +585,20 @@ static const char *setting_description(const App *app, int setting)
             : s->bitrate_mode == STREAM_BITRATE_STEADY_1000
             ? "About 1 Mbps: smoothest on weak Wi-Fi or a phone hotspot, a little softer. Next launch."
             : "A fixed rate. If the stats show RESENT/S climbing, pick a lower one. Next launch.";
+    case SETTING_VIDEO_SHARPEN:
+        if (!s->wide_video) return "Needs Screen mode: Wide 800. Sharpens edges and text on the console, at no cost to the stream.";
+        return s->video_sharpen == 0 ? "The picture exactly as it arrives."
+             : s->video_sharpen == 3 ? "Strong sharpening on the console: crispest text, but blocky spots in fast scenes stand out more."
+                                     : "Sharpens edges and small text on the console, at no cost to the stream or the frame rate.";
+    case SETTING_VIDEO_COLOR:
+        if (!s->wide_video) return "Needs Screen mode: Wide 800. Richer colour and contrast for the 3DS screen.";
+        return s->video_color == 0 ? "Colours exactly as the game sends them."
+             : s->video_color == 1 ? "A little more colour and contrast, so games look less washed out on the 3DS screen."
+                                   : "Strong colour and contrast. Fun for colourful games; skin and skies can look overdone.";
     case SETTING_FILTER:
         return s->sharpen
-            ? "NVIDIA sharpens before encoding. Crisper edges, but at this bitrate it costs detail elsewhere. Next launch."
-            : "No server sharpening: the bitrate goes to the picture itself, so less blocking and pulsing. Next launch.";
+            ? "NVIDIA sharpens before compressing, which spends scarce bitrate on edges: more blocking and pulsing. Sharpness above does it on the console for free. Next launch."
+            : "Recommended. The bitrate goes to the picture itself; use Sharpness above to sharpen on the console instead. Next launch.";
     case SETTING_GYRO:
         return s->gyro_mode == GFN_GYRO_OFF
             ? "Tilt and turn the console to aim, like a Switch or Steam Deck. Adds to the C-Stick; moves the mouse in mouse mode."
@@ -518,7 +617,7 @@ static const char *setting_description(const App *app, int setting)
              : s->camera_invert == 1 ? "Pushing the C-Stick up looks down, like a flight stick. Gyro aim is not inverted."
                                      : "Both directions of the C-Stick are reversed. Gyro aim is not inverted.";
     case SETTING_THEME:
-        return "The accent colour: Seiji celadon, Sakura cherry, Kin gold, Ai indigo or Fuji wisteria.";
+        return "The colour and the lower screen's wallpaper. Seiji, Sakura, Kin, Ai, Fuji, Beni, Matcha, Kaki, Sumi or Shiro.";
     case SETTING_VOLUME:
         return "Game audio volume on this console, on top of the 3DS volume slider.";
     case SETTING_MENU_AUDIO:
@@ -564,6 +663,8 @@ static const char *setting_description(const App *app, int setting)
     case SETTING_SFX:
         return s->sound_effects ? "Soft koto, wood and water sounds in the menus. In a game, only the stream menu and screenshots make a sound."
                                 : "Silent menus. The \"your game is ready\" chime still plays when a queue ends.";
+    case SETTING_SCREENSHOTS:
+        return "Look through the screenshots you took in games (stream menu > Screenshot). Press A to open; L and R browse, X deletes.";
     case SETTING_COMMUNITY:
         return "Chat with other players, get help and hear about new versions first. Scan with your phone, or visit discord.gg/K9Jy3t7YHE";
     case SETTING_REPORT:
@@ -627,6 +728,8 @@ void screens_setting_change(App *app, int setting, int direction)
     case SETTING_FAST_INPUT: s->fast_input = !s->fast_input; break;
     case SETTING_RESOLUTION: s->wide_video = !s->wide_video; break;
     case SETTING_FILTER: s->sharpen = !s->sharpen; break;
+    case SETTING_VIDEO_SHARPEN: s->video_sharpen = (s->video_sharpen + 4 + step) % 4; break;
+    case SETTING_VIDEO_COLOR: s->video_color = (s->video_color + 3 + step) % 3; break;
     case SETTING_GYRO:
         s->gyro_mode = (GfnGyroMode)((s->gyro_mode + GFN_GYRO_MODE_COUNT + step) % GFN_GYRO_MODE_COUNT);
         break;
@@ -721,9 +824,14 @@ static void draw_status_strip(const App *app, const char *text)
 
 static void draw_arrow(UiRect r, int direction, bool enabled, bool is_pressed)
 {
-    ui_rect_r(r, is_pressed ? UI_RAISED : UI_BG);
-    ui_outline(r.x, r.y, r.w, r.h, 1.0f, enabled ? UI_LINE_STRONG : UI_LINE);
-    const float cx = r.x + r.w / 2 + (is_pressed ? (float)direction : 0.0f), cy = r.y + r.h / 2;
+    /* Same key as the buttons; a disabled one is a flat outline. */
+    UiRect f = r;
+    if (enabled) f = ui_key(r, UI_BUTTON_NORMAL, is_pressed);
+    else {
+        ui_rect_r(r, UI_LINE);
+        ui_rect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, UI_BG);
+    }
+    const float cx = f.x + f.w / 2 + (is_pressed ? (float)direction : 0.0f), cy = f.y + f.h / 2;
     const u32 color = enabled ? UI_TEXT : UI_LINE_STRONG;
     if (direction < 0) ui_triangle(cx + 4, cy - 7, cx + 4, cy + 7, cx - 5, cy, color);
     else ui_triangle(cx - 4, cy - 7, cx - 4, cy + 7, cx + 5, cy, color);
@@ -835,6 +943,13 @@ static void draw_selection(float y, float h, float alpha)
 /* A placeholder card: the title's first letter on the seigaiha texture. */
 static void draw_art_placeholder(const GfnGame *game, float x, float y, float w, float h)
 {
+    /* An ensō over mist (gfx/no_cover.png); the name on it when it's big
+     * enough to read. */
+    if (ui_image(UI_IMAGE_NO_COVER, x, y, w / GAME_ART_WIDTH, 1.0f)) {
+        if (h > 80 && game)
+            ui_text_wrap(x + w / 2, y + h * 0.74f, 11, UI_TEXT, UI_ALIGN_CENTER, w - 10, 2, 13, game->title);
+        return;
+    }
     ui_rect(x, y, w, h, UI_SURFACE);
     ui_outline(x, y, w, h, 1.0f, UI_LINE);
     char initial[2] = { game && game->title[0] ? game->title[0] : '?', 0 };
@@ -913,7 +1028,18 @@ static void draw_library_top(const App *app, bool entering)
     if (!count) {
         const char *title = "No games here yet";
         const char *hint = searching ? "Try a different search." : "Press Y to load your library, or X to search.";
-        if (!searching && app->client->game_count && app->library_tab == LIBRARY_TAB_FAVOURITES) {
+        GfnProvider partner;
+        bool only = false;
+        static char wrong[160];
+        if (!searching && !app->client->game_count && provider_is_nvidia() && providers_partner_here(&partner, &only) &&
+            only) {
+            char country[4];
+            providers_country(country, sizeof(country));
+            snprintf(wrong, sizeof(wrong), "GeForce NOW in %s is %s's: sign out in Settings > Account and pick %s.",
+                     providers_country_name(country), partner.name, partner.name);
+            title = "Signed in with NVIDIA";
+            hint = wrong;
+        } else if (!searching && app->client->game_count && app->library_tab == LIBRARY_TAB_FAVOURITES) {
             title = "No favourites yet";
             hint = "Open a game and press Y to add it here.";
         } else if (!searching && app->client->game_count && app->library_tab == LIBRARY_TAB_RECENT) {
@@ -1082,10 +1208,91 @@ static void draw_session_top(const App *app)
     ui_hint_row(200, 223, hints);
 }
 
+/* ---- Screenshot viewer ---------------------------------------------------- */
+
+static const UiRect GAL_DELETE = { 16, 132, 140, 44 };
+static const UiRect GAL_BACK = { 164, 132, 140, 44 };
+
+static void draw_gallery_top(const App *app)
+{
+    (void)app;
+    const UiRect frame = { 34, 30, 332, 187 };
+    ui_rect(frame.x - 1, frame.y - 1, frame.w + 2, frame.h + 2, UI_LINE_STRONG);
+    ui_rect(frame.x, frame.y, frame.w, frame.h, UI_BG);
+    if (!gallery_draw(frame.x, frame.y, frame.w, frame.h))
+        ui_text(200, frame.y + frame.h / 2 - 8, 12, UI_TEXT_FAINT, UI_ALIGN_CENTER, "Loading...");
+    static const char *const hints[] = { "L R", "Browse", "X", "Delete", "B", "Back", NULL };
+    draw_footer(UI_TOP_WIDTH, hints);
+}
+
+static void draw_gallery_bottom(const App *app)
+{
+    ui_text(160, 2, 12, UI_ACCENT, UI_ALIGN_CENTER, "写真");
+    ui_label(160, 16, 11, UI_TEXT, UI_ALIGN_CENTER, "SCREENSHOTS");
+    ui_hline(0, 29, UI_BOTTOM_WIDTH, UI_LINE);
+    const unsigned count = gallery_count();
+    ui_textf(160, 50, 22, UI_TEXT, UI_ALIGN_CENTER, "%u / %u", count ? gallery_index() + 1 : 0, count);
+    ui_text(160, 84, 12, UI_TEXT_DIM, UI_ALIGN_CENTER, gallery_caption());
+    ui_button(GAL_DELETE, "DELETE", "削除", UI_BUTTON_DANGER, pressed(app, GAL_DELETE));
+    ui_button(GAL_BACK, "BACK", "戻る", UI_BUTTON_NORMAL, pressed(app, GAL_BACK));
+    const bool more = count > 1;
+    draw_arrow(SET_PREV, -1, more, pressed(app, SET_PREV));
+    draw_arrow(SET_NEXT, 1, more, pressed(app, SET_NEXT));
+    ui_label(160, 204, 11, UI_TEXT_FAINT, UI_ALIGN_CENTER, "L  /  R");
+}
+
+/* Settings home: the six sections, matching the grid below. */
+static void draw_settings_home_top(const App *app)
+{
+    static float bar_y;
+    draw_title(200, 31, "設定", "SETTINGS");
+    ui_hline(16, 57, 368, UI_LINE);
+    const int count = screens_section_count();
+    const float row_h = 25.0f;
+    const float target = LIST_TOP + app->settings_grid * row_h;
+    bar_y = bar_y == 0.0f ? target : ui_approach(bar_y, target, 24.0f);
+    draw_selection(bar_y, row_h - 1, 1.0f);
+    for (int i = 0; i < count; ++i) {
+        const SettingEntry *h = section_header(i);
+        const float y = LIST_TOP + i * row_h;
+        const bool on = i == app->settings_grid;
+        if (!ui_image_tint((UiImage)(UI_IMAGE_SEC_CONTROLS + i), 20, y + 2, 0.5f, on ? UI_ACCENT : UI_TEXT_FAINT))
+            ui_text(30, y + 4, 13, on ? UI_ACCENT : UI_TEXT_FAINT, UI_ALIGN_CENTER, SECTION_INFO[i].kanji);
+        ui_label(46, y + 6, 11, on ? UI_TEXT : UI_TEXT_DIM, UI_ALIGN_LEFT, h ? h->en : "");
+        ui_text_fit(378, y + 5, 11, on ? UI_TEXT_DIM : UI_TEXT_FAINT, UI_ALIGN_RIGHT, 200,
+                    SECTION_INFO[i].summary);
+    }
+    static const char *const hints[] = { "A", "Open", "B", "Save & back", NULL };
+    draw_footer(UI_TOP_WIDTH, hints);
+}
+
 static void draw_settings_top(const App *app, bool entering)
 {
     static float scroll, bar_y;
-    draw_title(200, 31, "設定", "SETTINGS");
+    static int last_section = -1;
+    if (app->gallery_open) {
+        draw_gallery_top(app);
+        return;
+    }
+    if (app->settings_section < 0) {
+        last_section = -1;
+        draw_settings_home_top(app);
+        return;
+    }
+    /* A new section starts at its top, without gliding over from the last. */
+    if (app->settings_section != last_section) entering = true;
+    last_section = app->settings_section;
+    const int section = app->settings_section, sections = screens_section_count();
+    const SettingEntry *header = section_header(section);
+    draw_title(200, 31, header ? header->jp : "設定", header ? header->en : "SETTINGS");
+    /* L and R step through the sections. */
+    const SettingEntry *prev = section_header((section + sections - 1) % sections);
+    const SettingEntry *next = section_header((section + 1) % sections);
+    const float chip_w = ui_button_chip(16, 34, "L", UI_TEXT_DIM);
+    ui_label(16 + chip_w + 5, 36, 11, UI_TEXT_FAINT, UI_ALIGN_LEFT, prev ? prev->en : "");
+    const float next_w = ui_text_width(next ? next->en : "", 11) + 6;
+    ui_label(384 - 22 - next_w, 36, 11, UI_TEXT_FAINT, UI_ALIGN_LEFT, next ? next->en : "");
+    ui_button_chip(384 - 16, 34, "R", UI_TEXT_DIM);
     ui_hline(16, 57, 368, UI_LINE);
 
     /* Lay the grouped list out once per frame. */
@@ -1093,10 +1300,17 @@ static void draw_settings_top(const App *app, bool entering)
     float ys[SETTING_ENTRY_COUNT];
     float content = 0.0f, selected_y = 0.0f;
     const int selected = screens_setting_at(app->setting_index);
+    /* Only this section's rows; its name is the title. */
+    int in_section = -1;
     for (int i = 0; i < SETTING_ENTRY_COUNT; ++i) {
+        if (SETTING_ENTRIES[i].setting < 0) ++in_section;
         ys[i] = content;
+        if (SETTING_ENTRIES[i].setting < 0 || in_section != section) {
+            ys[i] = -1000.0f;
+            continue;
+        }
         if (SETTING_ENTRIES[i].setting == selected) selected_y = content;
-        content += SETTING_ENTRIES[i].setting < 0 ? HEADER_H : ROW_H;
+        content += ROW_H;
     }
     const float view_h = LIST_BOTTOM - LIST_TOP;
     float target = selected_y - view_h / 2.0f + ROW_H / 2.0f;
@@ -1116,6 +1330,7 @@ static void draw_settings_top(const App *app, bool entering)
 
     for (int i = 0; i < SETTING_ENTRY_COUNT; ++i) {
         const SettingEntry *e = &SETTING_ENTRIES[i];
+        if (ys[i] < -999.0f) continue;
         const float y = LIST_TOP + ys[i] - scroll;
         const float h = e->setting < 0 ? HEADER_H : ROW_H;
         const float a = EDGE_ALPHA(y, h);
@@ -1159,7 +1374,7 @@ static void draw_settings_top(const App *app, bool entering)
         ui_vline(392, LIST_TOP, rail_h, UI_LINE);
         ui_rect(391, thumb_y, 3, thumb_h, UI_ACCENT);
     }
-    static const char *const hints[] = { "A", "Change", "B", "Save & back", NULL };
+    static const char *const hints[] = { "A", "Change", "L R", "Section", "B", "Sections", NULL };
     draw_footer(UI_TOP_WIDTH, hints);
 }
 
@@ -1215,10 +1430,17 @@ static void draw_modal_top(const App *app, float p)
     static const char *const resume_other[] = { "A", "Resume", "B", "Back", NULL };
     static const char *const end_other[] = { "A", "End it", "B", "Back", NULL };
     static const char *const wait[] = { "A", "Try now", "B", "Stop", NULL };
+    static const char *pick[] = { "A", "", "X", "NVIDIA", "B", "Back", NULL };
+    static GfnProvider partner;
+    if (app->modal == MODAL_PROVIDER_PICK) {
+        providers_partner_here(&partner, NULL);
+        pick[1] = partner.name;
+    }
     ui_hint_row(200, 162, app->modal == MODAL_ERROR ? error : app->modal == MODAL_SEND_REPORT ? send :
                           app->modal == MODAL_REPORT_SENT ? done :
                           app->modal == MODAL_CONFLICT ? (app->conflict_same_game ? resume_other : end_other) :
-                          app->modal == MODAL_LIMIT_WAIT ? wait : confirm);
+                          app->modal == MODAL_LIMIT_WAIT ? wait :
+                          app->modal == MODAL_PROVIDER_PICK ? pick : confirm);
     ui_offset(0.0f, 0.0f);
 }
 
@@ -1243,10 +1465,137 @@ static void details_fact(float x, float y, const char *label, const char *value)
     ui_text_fit(x, y + 14, 13, UI_TEXT, UI_ALIGN_LEFT, 108, value);
 }
 
+/* ---- HOME Menu shortcut sheet ----------------------------------------------- */
+
+/* A dot running round an ensō: "working, don't leave". */
+static void draw_working_ring(float cx, float cy, float r)
+{
+    ui_enso(cx, cy, r, ui_with_alpha(UI_ACCENT, 0x60));
+    const float a = (float)ui_ticks() * 0.005f;
+    ui_circle(cx + r * cosf(a), cy + r * sinf(a), 3.5f, UI_ACCENT);
+}
+
+static const char *shortcut_step_text(void)
+{
+    static char text[64];
+    if (shortcut_removing()) return "Taking it off the HOME Menu...";
+    switch (shortcut_step()) {
+    case SHORTCUT_STEP_FETCH: return "Getting the game's art...";
+    case SHORTCUT_STEP_DRAW: return "Drawing the icon and banner...";
+    case SHORTCUT_STEP_BUILD: return "Building the shortcut...";
+    case SHORTCUT_STEP_INSTALL:
+        snprintf(text, sizeof(text), "Installing on the HOME Menu  %u%%", shortcut_progress() / 10);
+        return text;
+    case SHORTCUT_STEP_DONE: return "Done";
+    }
+    return "";
+}
+
+/* Top screen: the real banner and icon as they will look, the steps, then
+ * where to find it. */
+static void draw_shortcut_top(const App *app, const GfnGame *game)
+{
+    static float bar;
+    const int sheet = app->shortcut_sheet;
+    const bool removing = shortcut_removing() && (sheet == SHORTCUT_SHEET_WORKING || sheet == SHORTCUT_SHEET_REMOVED);
+    /* Below the status bar (wifi, battery, clock: rows 0-25). */
+    ui_text(16, 31, 12, UI_ACCENT, UI_ALIGN_LEFT, "近道");
+    const float tag_w = ui_text_width("近道", 12);
+    ui_label(16 + tag_w + 6, 33, 11, UI_TEXT_FAINT, UI_ALIGN_LEFT, "HOME MENU SHORTCUT");
+    ui_text_fit(384, 32, 11, UI_TEXT_DIM, UI_ALIGN_RIGHT, 170, game->title);
+    /* The banner as the HOME Menu will show it (at 80 %), the icon beside it. */
+    const float scale = 0.8f, bw = 256 * scale, bh = 128 * scale;
+    const float bx = 132, by = 52;
+    ui_rect(bx - 1, by - 1, bw + 2, bh + 2, UI_LINE_STRONG);
+    if (!removing && shortcut_preview_banner(bx, by, scale)) {
+        ui_rect(55, by + bh / 2 - 25, 50, 50, UI_LINE_STRONG);
+        shortcut_preview_icon(56, by + bh / 2 - 24, 1.0f);
+    } else {
+        ui_rect(bx, by, bw, bh, UI_SURFACE);
+        if (sheet == SHORTCUT_SHEET_WORKING) draw_working_ring(bx + bw / 2, by + bh / 2 - 8, 16);
+        if (sheet == SHORTCUT_SHEET_WORKING)
+            ui_text(bx + bw / 2, by + bh / 2 + 16, 11, UI_TEXT_FAINT, UI_ALIGN_CENTER,
+                    removing ? "Removing" : "Drawing...");
+    }
+    const float y = 172;
+    if (sheet == SHORTCUT_SHEET_WORKING) {
+        /* Three steps on one bar, as the software update shows them. */
+        static const char *const steps[] = { "ART", "BUILD", "INSTALL" };
+        const ShortcutStep now = shortcut_step();
+        const int step = removing || now == SHORTCUT_STEP_INSTALL ? 2 : now == SHORTCUT_STEP_BUILD ? 1
+                         : now == SHORTCUT_STEP_DONE ? 3 : 0;
+        const float overall = step >= 3 ? 1.0f : (step + (step == 2 ? shortcut_progress() / 1000.0f : 0.5f)) / 3.0f;
+        bar = ui_approach(bar, overall, 10.0f);
+        const float x0 = 70, w = 260;
+        ui_rect(x0, y, w, 4, UI_RAISED);
+        if (bar > 0.005f) ui_rect(x0, y, w * bar, 4, UI_ACCENT);
+        for (int i = 0; i < 3 && !removing; ++i)
+            ui_label(x0 + w * (i + 0.5f) / 3.0f, y + 12, 11, step >= i ? UI_TEXT : UI_TEXT_FAINT, UI_ALIGN_CENTER,
+                     steps[i]);
+        ui_text(200, y + 32, 11, UI_TEXT_DIM, UI_ALIGN_CENTER,
+                "Keep Kasumi open: this takes a few seconds.");
+        return;
+    }
+    bar = 0.0f;
+    if (sheet == SHORTCUT_SHEET_ADDED) {
+        ui_text(200, y - 4, 14, UI_ACCENT, UI_ALIGN_CENTER, "Added to your HOME Menu");
+        char text[200];
+        if (shortcut_used_wide_art() || game->wide_url[0])
+            snprintf(text, sizeof(text), "Press HOME: it is at the end of your icons, wrapped as a present until "
+                     "you open it once. It starts Kasumi and launches %.60s.", game->title);
+        else
+            snprintf(text, sizeof(text), "Press HOME to find it. Tip: refresh your library (Y) and make it again "
+                     "to get the game's own banner art.");
+        ui_text_wrap(200, y + 14, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, 360, 2, 14, text);
+    } else if (sheet == SHORTCUT_SHEET_REMOVED) {
+        ui_text(200, y - 4, 14, UI_TEXT, UI_ALIGN_CENTER, "Removed from your HOME Menu");
+        ui_text(200, y + 14, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, "Add it again any time from this page.");
+    } else {
+        ui_text(200, y - 4, 14, UI_DANGER, UI_ALIGN_CENTER, "Couldn't make the shortcut");
+        ui_text_wrap(200, y + 14, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, 360, 2, 14, app->shortcut_message);
+    }
+    static const char *const ok_hints[] = { "A", "OK", NULL };
+    static const char *const failed_hints[] = { "A", "Try again", "B", "Close", NULL };
+    draw_footer(UI_TOP_WIDTH, sheet == SHORTCUT_SHEET_FAILED ? failed_hints : ok_hints);
+}
+
+/* Lower screen: covers the game page so nothing else can be pressed. */
+static void draw_shortcut_bottom(const App *app)
+{
+    const int sheet = app->shortcut_sheet;
+    ui_rect(0, 0, UI_BOTTOM_WIDTH, UI_HEIGHT, UI_BG);
+    if (sheet == SHORTCUT_SHEET_WORKING) {
+        draw_working_ring(160, 70, 26);
+        ui_text(160, 116, 14, UI_TEXT, UI_ALIGN_CENTER, shortcut_step_text());
+        ui_text_wrap(160, 142, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, 280, 2, 14,
+                     "Please keep Kasumi open until it's done. Closing it now can leave a broken icon behind.");
+        return;
+    }
+    const bool failed = sheet == SHORTCUT_SHEET_FAILED;
+    ui_enso(160, 70, 26, failed ? UI_DANGER : UI_ACCENT);
+    ui_text(160, 58, 22, failed ? UI_DANGER : UI_ACCENT, UI_ALIGN_CENTER, failed ? "!" : "完");
+    ui_label(160, 110, 11, UI_TEXT, UI_ALIGN_CENTER,
+             failed ? "NOT ADDED" : sheet == SHORTCUT_SHEET_REMOVED ? "REMOVED" : "ADDED TO THE HOME MENU");
+    if (failed) {
+        ui_text_wrap(160, 130, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, 280, 3, 14, app->shortcut_message);
+        ui_button(PAIR_LEFT, "TRY AGAIN", "再試行", UI_BUTTON_PRIMARY, pressed(app, PAIR_LEFT));
+        ui_button(PAIR_RIGHT, "CLOSE", "閉じる", UI_BUTTON_NORMAL, pressed(app, PAIR_RIGHT));
+    } else {
+        if (sheet == SHORTCUT_SHEET_ADDED)
+            ui_text_wrap(160, 130, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, 280, 2, 14,
+                         "Press HOME to see it. Opening it starts this game for you.");
+        ui_button(SINGLE, "OK", "了解", UI_BUTTON_PRIMARY, pressed(app, SINGLE));
+    }
+}
+
 static void draw_details_top(const App *app)
 {
     const GfnGame *game = app_game(app, app->selected);
     if (!game) return;
+    if (app->shortcut_sheet != SHORTCUT_SHEET_NONE) {
+        draw_shortcut_top(app, game);
+        return;
+    }
     /* Cover on the left, facts on the right. */
     draw_game_art(game, 22, 38, 120, 1.0f);
     const float x = 160, w = 224;
@@ -1293,7 +1642,8 @@ static void draw_details_top(const App *app)
     ui_label(x, y, 11, UI_TEXT_FAINT, UI_ALIGN_LEFT, "STREAM");
     ui_text_fit(x, y + 14, 12, UI_TEXT_DIM, UI_ALIGN_LEFT, w, stream_profile_name());
 
-    static const char *const hints[] = { "A", "Play", "Y", "Favourite", "X", "Options", "B", "Back", NULL };
+    static const char *const hints[] = { "A", "Play", "Y", "Favourite", "X", "Options", "SELECT", "Shortcut",
+                                         "B", "Back", NULL };
     draw_footer(UI_TOP_WIDTH, hints);
 }
 
@@ -1510,8 +1860,18 @@ static void draw_details_bottom(const App *app, float overlay_p)
     ui_button(DET_FAV, favourite ? "SAVED" : "FAVOURITE", "お気に入り",
               favourite ? UI_BUTTON_ACTIVE : UI_BUTTON_NORMAL, pressed(app, DET_FAV));
     ui_button(DET_OPTIONS, "OPTIONS", "設定", UI_BUTTON_NORMAL, pressed(app, DET_OPTIONS));
+    /* HOME Menu shortcut: add, or (once there) remove. */
+    const ShortcutState shortcut = shortcut_state();
+    const bool on_home = shortcut_exists(game->app_id);
+    ui_button(DET_SHORTCUT,
+              shortcut == SHORTCUT_IDLE ? (on_home ? "ON THE HOME MENU  ·  REMOVE" : "+ ADD TO HOME MENU")
+              : shortcut == SHORTCUT_WORKING ? "INSTALLING THE SHORTCUT..." : "DRAWING THE SHORTCUT...",
+              NULL, on_home && shortcut == SHORTCUT_IDLE ? UI_BUTTON_ACTIVE : UI_BUTTON_NORMAL,
+              pressed(app, DET_SHORTCUT));
     ui_button(DET_BACK, "BACK", "戻る", UI_BUTTON_NORMAL, pressed(app, DET_BACK));
-    if (app->mapping_open) {
+    if (app->shortcut_sheet != SHORTCUT_SHEET_NONE) {
+        draw_shortcut_bottom(app);
+    } else if (app->mapping_open) {
         ui_rect(0, 0, UI_BOTTOM_WIDTH, UI_HEIGHT, UI_BG);
         draw_mapping_bottom(app);
     } else if (app->options_open) {
@@ -1675,8 +2035,8 @@ static void draw_update_bottom(const App *app)
     const float overall = step < 0 ? 0.0f : step >= 3 ? 1.0f : (step + info.progress / 1000.0f) / 3.0f;
     bar = ui_approach(bar, overall, 10.0f);
     const float bx = 30, bw = 260, by = 76;
-    ui_rounded(bx, by, bw, 6, 3, UI_RAISED);
-    if (bar > 0.005f) ui_rounded(bx, by, bw * bar, 6, 3, info.state == UPDATE_FAILED ? UI_DANGER : UI_ACCENT);
+    ui_rect(bx, by, bw, 4, UI_RAISED);
+    if (bar > 0.005f) ui_rect(bx, by, bw * bar, 4, info.state == UPDATE_FAILED ? UI_DANGER : UI_ACCENT);
     for (int i = 0; i < 3; ++i) {
         const float x = bx + bw * (i + 0.5f) / 3.0f;
         const bool done = step > i, now = step == i;
@@ -1896,19 +2256,25 @@ static void draw_library_bottom(const App *app)
     draw_arrow(l->next, 1, has_game && app->selected + 1 < app->list_count, pressed(app, l->next));
 
     const UiRect card = l->card;
-    ui_panel(card, UI_ACCENT);
+    ui_surface(card, UI_LINE, UI_SURFACE);
     if (has_game) {
         const GfnGame *game = app_game(app, app->selected);
-        /* Thumbnail on the left, text centred in the rest of the card. */
-        const float thumb = compact ? 42.0f : 48.0f;
-        draw_game_art(game, card.x + 8, card.y + (compact ? 7 : 10), thumb, 1.0f);
-        const float text_x = card.x + thumb + 16, text_w = card.w - thumb - 24, cx = text_x + text_w / 2;
-        const int lines = ui_text_wrap(cx, card.y + (compact ? 8 : 12), 14, UI_TEXT, UI_ALIGN_CENTER,
+        /* The cover at the card's full height on the left, a wash of the
+         * theme colour fading out behind it, and the text beside it. */
+        const float pad = 6.0f, thumb_h = card.h - pad * 2, thumb = thumb_h * GAME_ART_WIDTH / GAME_ART_HEIGHT;
+        C2D_DrawRectangle(card.x + 1, card.y + 1, 0.0f, card.w * 0.6f, card.h - 2,
+                          ui_with_alpha(UI_ACCENT, 0x28), ui_with_alpha(UI_ACCENT, 0x00),
+                          ui_with_alpha(UI_ACCENT, 0x28), ui_with_alpha(UI_ACCENT, 0x00));
+        draw_game_art(game, card.x + pad, card.y + pad, thumb, 1.0f);
+        const float text_x = card.x + pad + thumb + 10, text_w = card.x + card.w - 10 - text_x;
+        const int lines = ui_text_wrap(text_x, card.y + (compact ? 8 : 11), 14, UI_TEXT, UI_ALIGN_LEFT,
                                        text_w, 2, 17, game->title);
-        const float meta_y = card.y + (compact ? 14 : 18) + lines * 17.0f;
-        ui_pill(cx, meta_y - 2, UI_TEXT_DIM, UI_ALIGN_CENTER, store_label(game->store));
+        const float meta_y = card.y + (compact ? 14 : 17) + lines * 17.0f;
+        const float pill_w = ui_pill(text_x, meta_y - 2, UI_ACCENT, UI_ALIGN_LEFT, store_label(game->store));
+        if (game_prefs_favourite(game->app_id))
+            ui_text(text_x + pill_w + 6, meta_y - 2, 12, UI_KIN, UI_ALIGN_LEFT, "★");
         if (!compact)
-            ui_text_fit(cx, meta_y + 17, 11, UI_TEXT_FAINT, UI_ALIGN_CENTER, text_w, stream_profile_name());
+            ui_text_fit(text_x, meta_y + 18, 11, UI_TEXT_FAINT, UI_ALIGN_LEFT, text_w, stream_profile_name());
     } else {
         ui_text(160, card.y + 22, 13, UI_TEXT_DIM, UI_ALIGN_CENTER, "No game selected");
         ui_text(160, card.y + 44, 11, UI_TEXT_FAINT, UI_ALIGN_CENTER, "Load your library or search");
@@ -1918,16 +2284,14 @@ static void draw_library_bottom(const App *app)
     /* Continue: one tap (or START) back into the last game played. */
     if (compact) {
         const GfnGame *last = &client->games[app->continue_index];
-        const UiRect c = l->cont;
-        const bool down = pressed(app, c);
-        ui_rect_r(c, down ? UI_ACCENT_DEEP : UI_SURFACE);
-        ui_outline(c.x, c.y, c.w, c.h, 1.0f, UI_ACCENT);
-        ui_triangle(c.x + 12, c.y + 9, c.x + 12, c.y + 21, c.x + 21, c.y + 15, UI_ACCENT);
-        ui_label(c.x + 28, c.y + 9, 11, UI_ACCENT, UI_ALIGN_LEFT, "CONTINUE");
+        const UiRect c = ui_key(l->cont, UI_BUTTON_ACTIVE, pressed(app, l->cont));
+        const float my = c.y + c.h / 2;
+        ui_triangle(c.x + 12, my - 6, c.x + 12, my + 6, c.x + 21, my, UI_ACCENT);
+        ui_label(c.x + 28, my - 6, 11, UI_ACCENT, UI_ALIGN_LEFT, "CONTINUE");
         const float label_w = ui_text_width("CONTINUE", 11) + 9.0f, gap = 8;
-        ui_text_fit(c.x + 28 + label_w + gap, c.y + 7, 13, UI_TEXT, UI_ALIGN_LEFT,
+        ui_text_fit(c.x + 28 + label_w + gap, my - 8, 13, UI_TEXT, UI_ALIGN_LEFT,
                     c.w - 28 - label_w - gap - 54, last->title);
-        ui_button_chip(c.x + c.w - 50, c.y + 7, "START", UI_TEXT_DIM);
+        ui_button_chip(c.x + c.w - 50, my - 7.5f, "START", UI_TEXT_DIM);
     }
     const char *main_label = has_game ? "OPEN GAME" : client->game_count ? "SHOW ALL GAMES" : "LOAD LIBRARY";
     const char *main_jp = has_game ? "詳細" : client->game_count ? "全て" : "ライブラリ";
@@ -1977,8 +2341,8 @@ static void draw_gyro_preview(const App *app)
     const float t = (float)ui_ticks() / 1000.0f;
     const float sway = on ? sinf(t * 2.2f) * 10.0f : 0.0f;
     const float cx = 160 + sway, cy = 118;
-    ui_rounded(cx - 34, cy - 20, 68, 40, 6, on ? UI_ACCENT : UI_LINE_STRONG);
-    ui_rounded(cx - 32, cy - 18, 64, 36, 5, UI_SURFACE);
+    ui_rect(cx - 34, cy - 20, 68, 40, on ? UI_ACCENT : UI_LINE_STRONG);
+    ui_rect(cx - 32, cy - 18, 64, 36, UI_SURFACE);
     ui_rect(cx - 20, cy - 12, 40, 24, on ? UI_ACCENT_DEEP : UI_BG);
     ui_circle(cx - 26, cy - 6, 3, UI_LINE_STRONG);
     for (int side = -1; side <= 1; side += 2) {
@@ -2008,8 +2372,38 @@ static void draw_bitrate_preview(const App *app)
         ui_rect(x0 + (x1 - x0) * 0.4f, y - 1, (x1 - x0) * 0.4f, 2, ui_with_alpha(UI_ACCENT, 0x70));
 }
 
+/* Settings home, lower screen: a tile per section. */
+static void draw_settings_grid(const App *app)
+{
+    ui_text(160, 2, 12, UI_ACCENT, UI_ALIGN_CENTER, "設定");
+    ui_label(160, 16, 11, UI_TEXT, UI_ALIGN_CENTER, "SETTINGS");
+    ui_hline(0, 29, UI_BOTTOM_WIDTH, UI_LINE);
+    const int count = screens_section_count();
+    for (int i = 0; i < count && i < 6; ++i) {
+        const UiRect r = set_tile(i);
+        const bool on = i == app->settings_grid;
+        const UiRect f = ui_key(r, on ? UI_BUTTON_ACTIVE : UI_BUTTON_NORMAL, pressed(app, r));
+        const float cx = f.x + f.w / 2;
+        /* Brush icons (gfx/sec_*.png), in the theme colour when chosen. */
+        if (!ui_image_tint((UiImage)(UI_IMAGE_SEC_CONTROLS + i), cx - 20, f.y + 5, 1.0f,
+                           on ? UI_ACCENT : UI_TEXT_DIM))
+            ui_text(cx, f.y + 13, 17, on ? UI_ACCENT : UI_TEXT_DIM, UI_ALIGN_CENTER, SECTION_INFO[i].kanji);
+        const SettingEntry *h = section_header(i);
+        ui_text_fit(cx, f.y + 48, 10, on ? UI_TEXT : UI_TEXT_DIM, UI_ALIGN_CENTER, f.w - 8, h ? h->en : "");
+    }
+    ui_button(SET_BACK, "BACK", "戻る", UI_BUTTON_NORMAL, pressed(app, SET_BACK));
+}
+
 static void draw_settings_bottom(const App *app)
 {
+    if (app->gallery_open) {
+        draw_gallery_bottom(app);
+        return;
+    }
+    if (app->settings_section < 0) {
+        draw_settings_grid(app);
+        return;
+    }
     const int setting = screens_setting_at(app->setting_index);
     ui_text(160, 2, 12, UI_ACCENT, UI_ALIGN_CENTER, SETTING_JP[setting]);
     ui_label(160, 16, 11, UI_TEXT, UI_ALIGN_CENTER, SETTING_LABELS[setting]);
@@ -2033,10 +2427,10 @@ static void draw_settings_bottom(const App *app)
         if (setting == SETTING_GYRO) draw_gyro_preview(app);
         if (setting == SETTING_THEME) {
             for (int i = 0; i < UI_THEME_COUNT; ++i) {
-                const float sx = 160 + (i - 2) * 34.0f;
+                const float sx = 160 + (i - (UI_THEME_COUNT - 1) / 2.0f) * 27.0f;
                 const bool on = (unsigned)i == app->settings.theme;
-                if (on) ui_ring(sx, 88, 13, 1.5f, UI_TEXT, UI_BG);
-                ui_circle(sx, 88, 9, ui_theme_color((UiTheme)i));
+                if (on) ui_ring(sx, 88, 12, 1.5f, UI_TEXT, UI_BG);
+                ui_circle(sx, 88, 8, ui_theme_color((UiTheme)i));
             }
         }
         if (setting == SETTING_BITRATE) draw_bitrate_preview(app);
@@ -2407,6 +2801,14 @@ static void draw_modal_bottom(const App *app, float p)
         return;
     }
     const bool send = app->modal == MODAL_SEND_REPORT, share = app->modal == MODAL_SHARE_ASK;
+    if (app->modal == MODAL_PROVIDER_PICK) {
+        GfnProvider partner;
+        providers_partner_here(&partner, NULL);
+        ui_button(MODAL_LEFT, partner.name, "推奨", UI_BUTTON_PRIMARY, pressed(app, MODAL_LEFT));
+        ui_button(MODAL_RIGHT, "NVIDIA", "エヌビディア", UI_BUTTON_NORMAL, pressed(app, MODAL_RIGHT));
+        ui_offset(0.0f, 0.0f);
+        return;
+    }
     if (app->modal == MODAL_CONFLICT || app->modal == MODAL_LIMIT_WAIT) {
         const bool wait = app->modal == MODAL_LIMIT_WAIT, same = app->conflict_same_game;
         ui_button(MODAL_LEFT, wait ? "TRY NOW" : same ? "RESUME" : "END IT", wait ? "再試行" : same ? "再開" : "終了",
@@ -2438,8 +2840,27 @@ void screens_draw_bottom(const App *app)
     g_bottom_busy_animating = p < 1.0f || (overlay && op < 1.0f) || welcome_visible(app) ||
                               (app->view == VIEW_SETTINGS && app->setting_index >= 0 &&
                                (screens_setting_at(app->setting_index) == SETTING_GYRO));
-    ui_offset(0.0f, (1.0f - p) * 8.0f);
     const bool menus = app->view != VIEW_STREAM;
+    /* The menus' backdrop: a quiet dot grid with a cross every 32 px, and
+     * a glow of the theme colour fading down from the top. Drawn before the
+     * slide offset, so it stays put while screens move over it. */
+    if (menus) {
+        ui_offset(0.0f, 0.0f);
+        if (ui_backdrop()) {
+            /* The theme's wallpaper; the header band is glass, so the status
+             * line and titles read over any pattern. */
+            const UiRect band = { 0, 0, UI_BOTTOM_WIDTH, 30 };
+            ui_glass(band);
+            ui_rect(0, 0, UI_BOTTOM_WIDTH, 30, C2D_Color32(0x00, 0x00, 0x00, 0x50));
+            ui_hline(0, 30, UI_BOTTOM_WIDTH, C2D_Color32(0xFF, 0xFF, 0xFF, 0x30));
+        } else {
+            C2D_DrawRectangle(0, 0, 0.0f, UI_BOTTOM_WIDTH, 110, ui_with_alpha(UI_ACCENT, 0x14),
+                              ui_with_alpha(UI_ACCENT, 0x14), ui_with_alpha(UI_ACCENT, 0x00),
+                              ui_with_alpha(UI_ACCENT, 0x00));
+            ui_texture(UI_IMAGE_GRID, 0, 0, UI_BOTTOM_WIDTH, UI_HEIGHT, C2D_Color32(0xFF, 0xFF, 0xFF, 0x48));
+        }
+    }
+    ui_offset(0.0f, (1.0f - p) * 8.0f);
     const bool guide = app->guide_page >= 0 && menus;
     if (app->whats_new_open && menus) draw_whats_new_bottom(app);
     else if (guide) draw_guide_bottom(app);
@@ -2531,6 +2952,21 @@ AppAction screens_touch(const App *app, int x, int y)
     }
         break;
     case VIEW_SETTINGS:
+        if (app->gallery_open) {
+            if (ui_hit(SET_PREV, x, y)) return ACTION_GALLERY_PREV;
+            if (ui_hit(SET_NEXT, x, y)) return ACTION_GALLERY_NEXT;
+            if (ui_hit(GAL_DELETE, x, y)) return ACTION_GALLERY_DELETE;
+            if (ui_hit(GAL_BACK, x, y)) return ACTION_GALLERY_CLOSE;
+            return ACTION_NONE;
+        }
+        if (app->settings_section < 0) {
+            for (int i = 0; i < screens_section_count() && i < 6; ++i)
+                if (ui_hit(set_tile(i), x, y)) {
+                    g_touched_section = i;
+                    return ACTION_SETTINGS_SECTION;
+                }
+            return ui_hit(SET_BACK, x, y) ? ACTION_BACK : ACTION_NONE;
+        }
         if (ui_hit(SET_PREV, x, y)) return ACTION_VALUE_PREV;
         if (ui_hit(SET_NEXT, x, y)) return ACTION_VALUE_NEXT;
         if (ui_hit(SET_BACK, x, y)) return ACTION_BACK;
@@ -2544,6 +2980,13 @@ AppAction screens_touch(const App *app, int x, int y)
         }
         break;
     case VIEW_DETAILS:
+        if (app->shortcut_sheet == SHORTCUT_SHEET_WORKING) return ACTION_NONE;
+        if (app->shortcut_sheet == SHORTCUT_SHEET_FAILED) {
+            if (ui_hit(PAIR_LEFT, x, y)) return ACTION_RETRY;
+            if (ui_hit(PAIR_RIGHT, x, y)) return ACTION_DISMISS;
+            return ACTION_NONE;
+        }
+        if (app->shortcut_sheet != SHORTCUT_SHEET_NONE) return ui_hit(SINGLE, x, y) ? ACTION_CONFIRM : ACTION_NONE;
         if (app->mapping_open) {
             if (ui_hit(MAP_PREV, x, y)) return ACTION_MAP_PREV;
             if (ui_hit(MAP_NEXT, x, y)) return ACTION_MAP_NEXT;
@@ -2567,6 +3010,7 @@ AppAction screens_touch(const App *app, int x, int y)
         if (ui_hit(DET_STORE_NEXT, x, y)) return ACTION_VARIANT_NEXT;
         if (ui_hit(DET_FAV, x, y)) return ACTION_FAVOURITE;
         if (ui_hit(DET_OPTIONS, x, y)) return ACTION_OPTIONS;
+        if (ui_hit(DET_SHORTCUT, x, y)) return ACTION_SHORTCUT;
         if (ui_hit(DET_BACK, x, y)) return ACTION_BACK;
         break;
     case VIEW_STREAM:

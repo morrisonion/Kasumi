@@ -52,13 +52,21 @@ static unsigned g_output_stride;
  * UI thread only queues access units and keeps draining the network. */
 /* Build 57 used 4 slots and overflowed whenever frames arrived bunched up
  * (60 drops in one session, each a corrupted "flash"). */
-enum { AU_SLOTS = 10, AU_SLOT_CAPACITY = 192 * 1024, WIDE_OUTPUTS = 6 };
+/* Wide mode queues access units for the decoder thread in one ring of
+ * linear memory, each AU contiguous and 0x80-aligned for MVD. Beta.29
+ * exports: ten fixed 192 KB slots (1.9 MB, ~4 KB AUs at 1 Mbps) overflowed
+ * on the burst that follows a network stall (maxGap ~400 ms), and every
+ * overflow froze the picture until a keyframe ("decoder-backlog"). The ring
+ * holds 48 AUs (1.6 s) in about the same memory. */
+enum { AU_ENTRIES = 48, AU_RING_SIZE = 2 * 1024 * 1024, AU_MAX = AU_RING_SIZE / 4, WIDE_OUTPUTS = 6 };
 static Thread g_decoder;
 static volatile bool g_decoder_quit;
 static LightLock g_queue_lock;
 static LightEvent g_queue_event;
-static unsigned char *g_slots[AU_SLOTS];
-static size_t g_slot_sizes[AU_SLOTS];
+static unsigned char *g_ring;
+static size_t g_entry_offset[AU_ENTRIES], g_entry_size[AU_ENTRIES];
+/* Where the next AU goes (submitting thread only, under g_queue_lock). */
+static size_t g_ring_write;
 static unsigned g_queue_head, g_queue_count;
 static volatile bool g_resync_requested;
 /* After a dropped access unit, later P-frames would decode against missing
@@ -221,10 +229,8 @@ bool mvd_video_init(unsigned input_width, unsigned input_height)
             g_wide_outputs[i] = linearMemAlign(output_size, 0x80);
             buffers_ok = buffers_ok && g_wide_outputs[i];
         }
-        for (unsigned i = 0; i < AU_SLOTS; ++i) {
-            g_slots[i] = linearMemAlign(AU_SLOT_CAPACITY, 0x80);
-            buffers_ok = buffers_ok && g_slots[i];
-        }
+        g_ring = linearMemAlign(AU_RING_SIZE, 0x80);
+        buffers_ok = buffers_ok && g_ring;
     }
     if (!buffers_ok) {
         snprintf(g_status, sizeof(g_status), "MVD linear allocation failed");
@@ -267,6 +273,7 @@ bool mvd_video_init(unsigned input_width, unsigned input_height)
         LightLock_Init(&g_config_lock);
         LightEvent_Init(&g_queue_event, RESET_ONESHOT);
         g_queue_head = g_queue_count = 0;
+        g_ring_write = 0;
         for (unsigned i = 0; i < WIDE_OUTPUTS; ++i) g_output_state[i] = OUT_FREE;
         g_ready_count = 0;
         g_recycled_frames = 0;
@@ -757,20 +764,20 @@ static void decoder_main(void *arg)
         LightLock_Unlock(&g_frame_lock);
         if (target < 0) target = 0; /* unreachable: 6 outputs, 1 presenting */
         const unsigned rendered_before = g_frames;
+        unsigned char *au = g_ring + g_entry_offset[slot];
         if (!g_process_failed)
-            decode_access_unit(g_slots[slot], g_slots[slot], g_slot_sizes[slot],
-                               g_wide_outputs[target]);
+            decode_access_unit(au, au, g_entry_size[slot], g_wide_outputs[target]);
         LightLock_Lock(&g_frame_lock);
         if (g_frames != rendered_before) {
             g_output_state[target] = OUT_READY;
-            g_output_bytes[target] = g_slot_sizes[slot];
+            g_output_bytes[target] = g_entry_size[slot];
             g_ready_fifo[g_ready_count++] = target;
         } else {
             g_output_state[target] = OUT_FREE;
         }
         LightLock_Unlock(&g_frame_lock);
         LightLock_Lock(&g_queue_lock);
-        g_queue_head = (g_queue_head + 1) % AU_SLOTS;
+        g_queue_head = (g_queue_head + 1) % AU_ENTRIES;
         --g_queue_count;
         LightLock_Unlock(&g_queue_lock);
     }
@@ -787,7 +794,7 @@ static bool contains_idr(const unsigned char *data, size_t size)
 bool mvd_video_submit(const unsigned char *annex_b, size_t size)
 {
     if (!g_active || !annex_b || size == 0 || g_process_failed) return false;
-    const size_t capacity = g_wide ? AU_SLOT_CAPACITY : INPUT_CAPACITY;
+    const size_t capacity = g_wide ? AU_MAX : INPUT_CAPACITY;
     if (size > capacity) {
         ++g_errors;
         snprintf(g_status, sizeof(g_status), "MVD AU too large: %lu", (unsigned long)size);
@@ -807,8 +814,25 @@ bool mvd_video_submit(const unsigned char *annex_b, size_t size)
         }
         return decode_access_unit(annex_b, g_input, size, g_output);
     }
+    /* Room in the ring: after the newest AU, else from the start, never
+     * reaching the oldest one still queued (the decoder is reading it). The
+     * write position never lands exactly on the oldest, so "write == oldest"
+     * can't be mistaken for an empty ring. */
+    const size_t need = (size + 0x7F) & ~(size_t)0x7F;
+    size_t start = (size_t)-1;
     LightLock_Lock(&g_queue_lock);
-    if (g_queue_count == AU_SLOTS) {
+    if (g_queue_count == 0) {
+        start = 0;
+    } else if (g_queue_count < AU_ENTRIES) {
+        const size_t oldest = g_entry_offset[g_queue_head];
+        if (g_ring_write >= oldest) {
+            if (g_ring_write + need <= AU_RING_SIZE) start = g_ring_write;
+            else if (need < oldest) start = 0;
+        } else if (g_ring_write + need < oldest) {
+            start = g_ring_write;
+        }
+    }
+    if (start == (size_t)-1) {
         LightLock_Unlock(&g_queue_lock);
         /* Dropping breaks the reference chain: freeze until a keyframe. */
         ++g_errors;
@@ -823,11 +847,13 @@ bool mvd_video_submit(const unsigned char *annex_b, size_t size)
             diagnostic_log("MVD", "queue full while the decoder starts; waiting for IDR");
         return false;
     }
-    const unsigned slot = (g_queue_head + g_queue_count) % AU_SLOTS;
+    const unsigned slot = (g_queue_head + g_queue_count) % AU_ENTRIES;
+    g_entry_offset[slot] = start;
+    g_entry_size[slot] = size;
+    g_ring_write = start + need;
     LightLock_Unlock(&g_queue_lock);
-    memcpy(g_slots[slot], annex_b, size);
-    GSPGPU_FlushDataCache(g_slots[slot], size);
-    g_slot_sizes[slot] = size;
+    memcpy(g_ring + start, annex_b, size);
+    GSPGPU_FlushDataCache(g_ring + start, size);
     LightLock_Lock(&g_queue_lock);
     ++g_queue_count;
     LightLock_Unlock(&g_queue_lock);
@@ -844,10 +870,8 @@ void mvd_video_close(void)
         threadFree(g_decoder);
         g_decoder = NULL;
     }
-    for (unsigned i = 0; i < AU_SLOTS; ++i) {
-        if (g_slots[i]) linearFree(g_slots[i]);
-        g_slots[i] = NULL;
-    }
+    if (g_ring) linearFree(g_ring);
+    g_ring = NULL;
     for (unsigned i = 1; i < WIDE_OUTPUTS; ++i) {
         if (g_wide_outputs[i]) linearFree(g_wide_outputs[i]);
         g_wide_outputs[i] = NULL;

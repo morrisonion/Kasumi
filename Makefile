@@ -24,7 +24,7 @@ APP_AUTHOR := p0mpurin
 VERSION_MAJOR := 0
 VERSION_MINOR := 9
 VERSION_MICRO := 0
-VERSION_SUFFIX := -beta.29
+VERSION_SUFFIX := -beta.30
 VERSION := $(VERSION_MAJOR).$(VERSION_MINOR).$(VERSION_MICRO)$(VERSION_SUFFIX)
 APP_PRODUCT_CODE := CTR-P-KSMI
 APP_UNIQUE_ID := 0x4B534
@@ -69,7 +69,12 @@ export GFX_OBJECTS := $(foreach name,$(GFX_NAMES),$(CURDIR)/$(BUILD)/$(name).t3x
 # _binary_NAME_opus_start/_end (menu music and voice cues, see audio/CREDITS.txt).
 AUDIO_NAMES := $(basename $(notdir $(wildcard audio/*.opus)))
 export AUDIO_OBJECTS := $(foreach name,$(AUDIO_NAMES),$(CURDIR)/$(BUILD)/$(name).opus.o)
-export OFILES := $(OFILES_SOURCES) $(CACERT_OBJECT) $(GFX_OBJECTS) $(AUDIO_OBJECTS)
+# HOME Menu shortcut template (shortcut/, prebuilt): _binary_shortcut_cia_start/_end.
+export SHORTCUT_OBJECT := $(CURDIR)/$(BUILD)/shortcut_template.o
+# GPU shaders: shaders/NAME.v.pica -> NAME.shbin (picasso) -> _binary_NAME_shbin_start/_end.
+SHADER_NAMES := $(basename $(basename $(notdir $(wildcard shaders/*.v.pica))))
+export SHADER_OBJECTS := $(foreach name,$(SHADER_NAMES),$(CURDIR)/$(BUILD)/$(name).shbin.o)
+export OFILES := $(OFILES_SOURCES) $(CACERT_OBJECT) $(GFX_OBJECTS) $(AUDIO_OBJECTS) $(SHORTCUT_OBJECT) $(SHADER_OBJECTS)
 export LD := $(CC)
 export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) $(foreach dir,$(LIBDIRS),-I$(dir)/include) -I$(CURDIR)/$(BUILD) -I$(CURDIR)/vendor/libpeer/src -I$(CURDIR)/vendor/mbedtls/include -I$(CURDIR)/vendor/libsrtp/include -I$(CURDIR)/build-transport/include -I$(CURDIR)/build-transport/mbedtls/include
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
@@ -77,7 +82,7 @@ export _3DSXDEPS := $(OUTPUT).smdh
 export _3DSXFLAGS := --smdh=$(CURDIR)/$(TARGET).smdh
 
 .PHONY: all clean cia run-info
-all: $(BUILD) $(CACERT_OBJECT) $(GFX_OBJECTS) $(AUDIO_OBJECTS)
+all: $(BUILD) $(CACERT_OBJECT) $(GFX_OBJECTS) $(AUDIO_OBJECTS) $(SHORTCUT_OBJECT) $(SHADER_OBJECTS)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
 $(BUILD):
@@ -89,9 +94,10 @@ $(CACERT_OBJECT): romfs/cacert.pem | $(BUILD)
 
 GFX_FORMAT_hero := rgb565
 GFX_FORMAT_discord := rgb565
+GFX_FORMAT_no_cover := rgb565
 
 $(BUILD)/%.t3x: gfx/%.png | $(BUILD)
-	@$(DEVKITPRO)/tools/bin/tex3ds -f $(or $(GFX_FORMAT_$*),rgba8) -z auto -o "$@" "$<" > /dev/null
+	@$(DEVKITPRO)/tools/bin/tex3ds -f $(or $(GFX_FORMAT_$*),$(if $(filter bg_% glass_%,$*),etc1),rgba8) -z auto -o "$@" "$<" > /dev/null
 
 $(CURDIR)/$(BUILD)/%.t3x.o: $(BUILD)/%.t3x
 	@cd $(BUILD) && $(OBJCOPY) -I binary -O elf32-littlearm -B arm 		--rename-section .data=.rodata.gfx,alloc,load,readonly,data,contents "$*.t3x" "$*.t3x.o"
@@ -99,6 +105,16 @@ $(CURDIR)/$(BUILD)/%.t3x.o: $(BUILD)/%.t3x
 $(CURDIR)/$(BUILD)/%.opus.o: audio/%.opus | $(BUILD)
 	@cp "$<" "$(BUILD)/$*.opus"
 	@cd $(BUILD) && $(OBJCOPY) -I binary -O elf32-littlearm -B arm --rename-section .data=.rodata.audio,alloc,load,readonly,data,contents "$*.opus" "$*.opus.o"
+
+$(BUILD)/%.shbin: shaders/%.v.pica | $(BUILD)
+	@$(DEVKITPRO)/tools/bin/picasso -o "$@" "$<"
+
+$(CURDIR)/$(BUILD)/%.shbin.o: $(BUILD)/%.shbin
+	@cd $(BUILD) && $(OBJCOPY) -I binary -O elf32-littlearm -B arm --rename-section .data=.rodata.shader,alloc,load,readonly,data,contents "$*.shbin" "$*.shbin.o"
+
+$(SHORTCUT_OBJECT): resources/shortcut.cia | $(BUILD)
+	@cp "$<" "$(BUILD)/shortcut.cia"
+	@cd $(BUILD) && $(OBJCOPY) -I binary -O elf32-littlearm -B arm --rename-section .data=.rodata.shortcut,alloc,load,readonly,data,contents shortcut.cia shortcut_template.o
 
 clean:
 	@rm -rf $(BUILD) $(TARGET).3dsx $(TARGET).elf $(TARGET).smdh $(TARGET).map $(TARGET).cia

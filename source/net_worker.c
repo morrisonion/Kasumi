@@ -1,4 +1,6 @@
 #include "net_worker.h"
+#include "shortcut.h"
+#include "queue_eta.h"
 
 #include <3ds.h>
 #include <stdio.h>
@@ -114,6 +116,7 @@ static bool run_job(NetJobKind kind, const char *text, const GfnGame *game)
         return true;
     case NET_JOB_RECOVER: return gfn_recover_session(&g_work, game);
     case NET_JOB_KEEP_LOGIN: return gfn_keep_login(&g_work);
+    case NET_JOB_SHORTCUT: return shortcut_work();
     case NET_JOB_SIGN_OUT:
         gfn_sign_out(&g_work);
         return true;
@@ -171,6 +174,7 @@ static void worker_main(void *arg)
         if (!providers_done && !gfn_session_active(&g_work)) {
             providers_done = true;
             providers_fetch();
+            queue_eta_fetch();
         }
         /* Box art only downloads while no game is queued or running, so it
          * never competes with the stream for Wi-Fi. */

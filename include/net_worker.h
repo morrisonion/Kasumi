@@ -38,7 +38,9 @@ typedef enum {
     /* The stream dropped: ask NVIDIA about the session, RESUME if paused. */
     NET_JOB_RECOVER,
     /* Renew the login before it runs out (in a game too). */
-    NET_JOB_KEEP_LOGIN
+    NET_JOB_KEEP_LOGIN,
+    /* Install or remove a HOME Menu shortcut (shortcut.h). */
+    NET_JOB_SHORTCUT
 } NetJobKind;
 
 typedef struct {
