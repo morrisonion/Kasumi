@@ -165,6 +165,8 @@ typedef struct Sctp {
   uint32_t last_outbound_sent_ms;
   uint32_t smoothed_rtt_ms;
   DtlsSrtp* dtls_srtp;
+  /* Built-in SCTP only: DATA chunks waiting for a SACK (sctp.c). */
+  struct SctpRetransmitQueue* rtx;
   int stream_count;
   SctpStreamEntry stream_table[SCTP_MAX_STREAMS];
 #if CONFIG_USE_USRSCTP

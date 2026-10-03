@@ -480,7 +480,15 @@ static void on_data_open(void *userdata)
     diagnostic_log("INPUT", "data channel open");
 }
 
-static void on_data_close(void *userdata) { (void)userdata; }
+static void on_data_close(void *userdata)
+{
+    WebRtcTransport *t = userdata;
+    /* The rig ended the input association: nothing pressed reaches the
+     * game any more, though video keeps playing. */
+    diagnostic_flag("input-closed", "data channel closed after %llu s, reports=%u",
+                    (unsigned long long)((osGetTime() - t->connected_at) / 1000), t->input_reports);
+    t->data_open = false;
+}
 
 static void on_state(PeerConnectionState state, void *userdata)
 {

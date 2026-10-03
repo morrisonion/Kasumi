@@ -247,6 +247,159 @@ static int sctp_record_open(Sctp* sctp, uint16_t sid, const char* data, size_t l
   return 0;
 }
 
+#if !CONFIG_USE_USRSCTP
+/* The built-in SCTP used to send every DATA chunk exactly once. One lost
+ * controller packet left a hole in the TSN sequence that the peer could
+ * never fill; a few thousand TSNs later (about a minute of input) the
+ * peer's receive map was full and it dropped every new chunk, so the
+ * controls went dead for good while video and audio carried on (report
+ * KRKZUR: sessions ended by the player after ~30 min of "lost control").
+ * Chunks now wait here until a SACK covers them and are sent again when
+ * one stays unacknowledged for longer than the retransmission timeout. */
+#define SCTP_RTX_SLOTS 256
+#define SCTP_RTX_PACKET_MAX 192
+
+typedef struct {
+  uint32_t tsn;
+  uint32_t sent_ms;
+  uint32_t first_ms;
+  uint16_t len;
+  uint8_t tries;
+  uint8_t acked;
+  uint8_t data[SCTP_RTX_PACKET_MAX];
+} SctpRtxPacket;
+
+typedef struct SctpRetransmitQueue {
+  SctpRtxPacket packets[SCTP_RTX_SLOTS];
+  unsigned head;
+  unsigned count;
+  uint32_t last_scan_ms;
+  uint32_t retransmits;
+  uint32_t recovered;
+  uint32_t full;
+  uint32_t oversize;
+  int stall_logged;
+  /* A SACK has acknowledged one of our chunks. Until then a full queue
+   * means the peer does not SACK at all, and resending is switched off
+   * (the old send-once behaviour) instead of holding input back. */
+  int ever_acked;
+  int disabled;
+} SctpRetransmitQueue;
+
+static SctpRetransmitQueue* sctp_rtx(Sctp* sctp) {
+  if (!sctp->rtx)
+    sctp->rtx = calloc(1, sizeof(SctpRetransmitQueue));
+  return sctp->rtx;
+}
+
+static SctpRtxPacket* sctp_rtx_at(SctpRetransmitQueue* q, unsigned index) {
+  return &q->packets[(q->head + index) % SCTP_RTX_SLOTS];
+}
+
+/* Keep a copy of a DATA packet just sent. */
+static void sctp_rtx_store(Sctp* sctp, uint32_t tsn, const uint8_t* packet, size_t len) {
+  SctpRetransmitQueue* q = sctp_rtx(sctp);
+  if (!q || q->disabled)
+    return;
+  if (len > SCTP_RTX_PACKET_MAX) {
+    if (q->oversize++ == 0)
+      sctp_diag_log("rtx_oversize tsn=%u bytes=%zu (cannot be resent)", tsn, len);
+    return;
+  }
+  if (q->count == SCTP_RTX_SLOTS)
+    return; /* sctp_outgoing_data refuses to send in this case */
+  SctpRtxPacket* slot = sctp_rtx_at(q, q->count++);
+  slot->tsn = tsn;
+  slot->sent_ms = slot->first_ms = ports_get_monotonic_time();
+  slot->len = (uint16_t)len;
+  slot->tries = 0;
+  slot->acked = 0;
+  memcpy(slot->data, packet, len);
+}
+
+/* A SACK: drop what its cumulative TSN covers, mark gap-acked chunks. */
+static void sctp_rtx_ack(Sctp* sctp, const SctpSackChunk* sack, size_t chunk_len) {
+  SctpRetransmitQueue* q = sctp->rtx;
+  if (!q || !q->count || chunk_len < sizeof(SctpSackChunk))
+    return;
+  const uint32_t cumulative = ntohl(sack->cumulative_tsn_ack);
+  unsigned popped = 0, resent = 0;
+  while (q->count && (int32_t)(sctp_rtx_at(q, 0)->tsn - cumulative) <= 0) {
+    if (sctp_rtx_at(q, 0)->tries)
+      ++resent;
+    q->head = (q->head + 1) % SCTP_RTX_SLOTS;
+    --q->count;
+    ++popped;
+  }
+  if (popped)
+    q->ever_acked = 1;
+  if (resent)
+    q->recovered += resent;
+  if (popped && q->stall_logged) {
+    sctp_diag_log("rtx_resumed cumAck=%u outstanding=%u retransmits=%u", cumulative, q->count,
+                  q->retransmits);
+    q->stall_logged = 0;
+  }
+  unsigned blocks = ntohs(sack->number_of_gap_ack_blocks);
+  const unsigned room = (unsigned)((chunk_len - sizeof(SctpSackChunk)) / 4);
+  if (blocks > room)
+    blocks = room;
+  for (unsigned b = 0; b < blocks; b++) {
+    uint16_t start, end;
+    memcpy(&start, sack->blocks + b * 4, 2);
+    memcpy(&end, sack->blocks + b * 4 + 2, 2);
+    const uint32_t first = cumulative + ntohs(start), last = cumulative + ntohs(end);
+    for (unsigned i = 0; i < q->count; i++) {
+      SctpRtxPacket* p = sctp_rtx_at(q, i);
+      if ((int32_t)(p->tsn - first) >= 0 && (int32_t)(p->tsn - last) <= 0)
+        p->acked = 1;
+    }
+  }
+}
+
+/* Called from sctp_tick: resend chunks the peer has not acknowledged. */
+static void sctp_rtx_tick(Sctp* sctp) {
+  SctpRetransmitQueue* q = sctp->rtx;
+  if (!q || q->disabled || !q->count || !sctp->dtls_srtp)
+    return;
+  const uint32_t now = ports_get_monotonic_time();
+  if ((uint32_t)(now - q->last_scan_ms) < 20)
+    return;
+  q->last_scan_ms = now;
+  /* RFC 4960 starts at 3 s; a controller wants far less. Twice the
+   * measured round trip, 200 ms to 1 s, doubling on each retry. */
+  uint32_t rto = sctp->smoothed_rtt_ms ? sctp->smoothed_rtt_ms * 2 + 50 : 300;
+  if (rto < 200)
+    rto = 200;
+  if (rto > 1000)
+    rto = 1000;
+  unsigned sent = 0;
+  for (unsigned i = 0; i < q->count && sent < 8; i++) {
+    SctpRtxPacket* p = sctp_rtx_at(q, i);
+    if (p->acked)
+      continue;
+    const uint32_t wait = rto << (p->tries < 3 ? p->tries : 3);
+    if ((uint32_t)(now - p->sent_ms) < wait)
+      continue;
+    const int written = dtls_srtp_write(sctp->dtls_srtp, p->data, p->len);
+    p->sent_ms = now;
+    if (p->tries < 255)
+      p->tries++;
+    q->retransmits++;
+    sent++;
+    if (q->retransmits <= 20 || q->retransmits % 200 == 0)
+      sctp_diag_log("rtx tsn=%u try=%u ageMs=%u outstanding=%u rto=%u total=%u dtlsWrite=%d", p->tsn,
+                    p->tries, (unsigned)(now - p->first_ms), q->count, rto, q->retransmits, written);
+  }
+  const SctpRtxPacket* oldest = sctp_rtx_at(q, 0);
+  if (!q->stall_logged && (uint32_t)(now - oldest->first_ms) >= 5000) {
+    q->stall_logged = 1;
+    sctp_diag_log("rtx_stalled tsn=%u ageMs=%u outstanding=%u tries=%u retransmits=%u", oldest->tsn,
+                  (unsigned)(now - oldest->first_ms), q->count, oldest->tries, q->retransmits);
+  }
+}
+#endif
+
 int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid) {
 #if CONFIG_USE_USRSCTP
   if (!sctp || !sctp->sock || !sctp->connected || sctp->closing) {
@@ -296,6 +449,22 @@ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uin
   size_t pos = 0;
   static uint16_t sqn = 0;
 
+  /* While the peer is not acknowledging (a Wi-Fi stall), stop adding to
+   * the hole: the oldest chunks must stay resendable. */
+  SctpRetransmitQueue* rtx = sctp_rtx(sctp);
+  const unsigned fragments = (unsigned)((len + payload_max - 1) / payload_max);
+  if (rtx && !rtx->disabled && !rtx->ever_acked && rtx->count + fragments > SCTP_RTX_SLOTS) {
+    sctp_diag_log("rtx_disabled no SACK for %u chunks", rtx->count);
+    rtx->disabled = 1;
+    rtx->count = 0;
+  }
+  if (rtx && !rtx->disabled && rtx->count + fragments > SCTP_RTX_SLOTS) {
+    if (rtx->full++ % 300 == 0)
+      sctp_diag_log("rtx_full outstanding=%u dropped=%u", rtx->count, rtx->full);
+    errno = EWOULDBLOCK;
+    return -1;
+  }
+
   SctpPacket* packet = (SctpPacket*)(sctp->buf);
   SctpDataChunk* chunk = (SctpDataChunk*)(packet->chunks);
 
@@ -317,7 +486,9 @@ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uin
 
     packet->header.checksum = htonl(sctp_get_checksum(sctp, (const uint8_t*)sctp->buf, SCTP_MTU));
 
-    if (sctp_outgoing_data_cb(sctp, sctp->buf, SCTP_MTU, 0, 0) < 0)
+    const int fragment_ret = sctp_outgoing_data_cb(sctp, sctp->buf, SCTP_MTU, 0, 0);
+    sctp_rtx_store(sctp, ntohl(chunk->tsn), sctp->buf, SCTP_MTU);
+    if (fragment_ret < 0)
       return -1;
     sctp->last_outbound_tsn = ntohl(chunk->tsn);
     sctp->last_outbound_sent_ms = ports_get_epoch_time();
@@ -338,7 +509,10 @@ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uin
 
     packet->header.checksum = htonl(sctp_get_checksum(sctp, (const uint8_t*)sctp->buf, padding_len));
 
-    if (sctp_outgoing_data_cb(sctp, sctp->buf, padding_len, 0, 0) < 0)
+    /* Kept even when the write failed: the TSN is used up either way. */
+    const int last_ret = sctp_outgoing_data_cb(sctp, sctp->buf, padding_len, 0, 0);
+    sctp_rtx_store(sctp, ntohl(chunk->tsn), sctp->buf, padding_len);
+    if (last_ret < 0)
       return -1;
     sctp->last_outbound_tsn = ntohl(chunk->tsn);
     sctp->last_outbound_sent_ms = ports_get_epoch_time();
@@ -412,6 +586,9 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
   SctpChunkCommon* chunk_common;
   SctpPacket* in_packet = (SctpPacket*)buf;
   SctpPacket* out_packet = (SctpPacket*)sctp->buf;
+  /* A DATA chunk of ours riding along with a SACK (the DCEP ACK). */
+  int bundled_data = 0;
+  uint32_t bundled_tsn = 0;
 
   // Header
 #if 0
@@ -463,6 +640,8 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
           data_chunk = (SctpDataChunk*)sack_chunk->blocks;
           data_chunk->type = SCTP_DATA;
           data_chunk->iube = 0x03;
+          bundled_tsn = sctp->tsn;
+          bundled_data = 1;
           data_chunk->tsn = htonl(sctp->tsn++);
           data_chunk->sid = htons(0);
           data_chunk->sqn = htons(0);
@@ -475,6 +654,17 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
             sctp->onmessage((char*)data_chunk->data, ntohs(data_chunk->length) - sizeof(SctpDataChunk),
                             sctp->userdata, ntohs(data_chunk->sid));
           }
+        }
+        /* Only the first DATA chunk is answered, but a SACK bundled after
+         * it still acknowledges our chunks. */
+        for (size_t at = pos + ((ntohs(chunk_common->length) + 3u) & ~3u); at + 4 <= len;) {
+          const SctpChunkCommon* next = (const SctpChunkCommon*)(buf + at);
+          const size_t next_len = ntohs(next->length);
+          if (next_len < 4)
+            break;
+          if (next->type == SCTP_SACK)
+            sctp_rtx_ack(sctp, (const SctpSackChunk*)next, len - at < next_len ? len - at : next_len);
+          at += (next_len + 3u) & ~3u;
         }
         pos = len;  // Do not handle other msg
       } break;
@@ -542,6 +732,7 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
       } break;
       case SCTP_SACK: {
         SctpSackChunk* sack = (SctpSackChunk*)(buf + pos);
+        sctp_rtx_ack(sctp, sack, len - pos < ntohs(sack->common.length) ? len - pos : ntohs(sack->common.length));
         if (sctp->last_outbound_sent_ms != 0 &&
             (int32_t)(ntohl(sack->cumulative_tsn_ack) -
                       sctp->last_outbound_tsn) >= 0) {
@@ -632,6 +823,10 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
       const uint32_t calculated_checksum = sctp_get_checksum(sctp, sctp->buf, length);
       out_packet->header.checksum = htonl(calculated_checksum);
       const int written = dtls_srtp_write(sctp->dtls_srtp, sctp->buf, length);
+      if (bundled_data) {
+        sctp_rtx_store(sctp, bundled_tsn, sctp->buf, length);
+        bundled_data = 0;
+      }
       static uint32_t internal_tx_diag_count = 0;
       internal_tx_diag_count++;
       if (written < 0 || internal_tx_diag_count <= 10 || internal_tx_diag_count % 600 == 0) {
@@ -885,7 +1080,8 @@ void sctp_tick(Sctp* sctp) {
   }
   sctp_drain(sctp);
 #else
-  (void)sctp;
+  if (sctp && sctp->connected)
+    sctp_rtx_tick(sctp);
 #endif
 }
 
@@ -1101,6 +1297,14 @@ void sctp_destroy_association(Sctp* sctp) {
   sctp->connected = 0;
   sctp->stream_count = 0;
   memset(sctp->stream_table, 0, sizeof(sctp->stream_table));
+#if !CONFIG_USE_USRSCTP
+  if (sctp->rtx && (sctp->rtx->retransmits || sctp->rtx->full))
+    sctp_diag_log("rtx_summary retransmits=%u recovered=%u full=%u oversize=%u outstanding=%u",
+                  sctp->rtx->retransmits, sctp->rtx->recovered, sctp->rtx->full, sctp->rtx->oversize,
+                  sctp->rtx->count);
+#endif
+  free(sctp->rtx);
+  sctp->rtx = NULL;
 }
 
 int sctp_is_connected(Sctp* sctp) {
