@@ -428,7 +428,7 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
   const uint8_t first_chunk_type = len > sizeof(SctpHeader) ? (uint8_t)buf[sizeof(SctpHeader)] : 0xff;
   static uint32_t internal_rx_diag_count = 0;
   internal_rx_diag_count++;
-  if (!crc_ok || internal_rx_diag_count <= 10 || internal_rx_diag_count % 600 == 0) {
+  if (!crc_ok || internal_rx_diag_count <= 10) {
     sctp_diag_log("internal_rx count=%u chunk=%u bytes=%zu crcOk=%d receivedCrc=%08x calculatedCrc=%08x",
                   internal_rx_diag_count, first_chunk_type, len, crc_ok,
                   received_crc32c, calculated_crc32c);

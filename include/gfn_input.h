@@ -36,6 +36,10 @@ typedef struct {
     GfnGyroMode gyro_mode;
     /* 0 low, 1 medium, 2 high. */
     unsigned gyro_speed;
+    /* C-Stick: 0 slow, 1 normal, 2 fast, 3 fastest. */
+    unsigned camera_speed;
+    /* C-Stick: 0 as is, 1 up-down inverted, 2 both axes inverted. */
+    unsigned camera_invert;
 } GfnInputConfig;
 
 enum {

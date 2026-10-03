@@ -112,6 +112,8 @@ typedef struct {
     int seat_setup_step;
     int queue_step;
     int queue_best;
+    /* NVIDIA's own number before the lock above (for the hidden-queue check). */
+    int queue_reported;
     int64_t next_session_poll_at;
     /* Since when session polls have only got 502/503/504/429, and how many:
      * after a while the session counts as failed instead of retrying on. */
@@ -135,6 +137,8 @@ typedef struct {
     /* Why the last launch or session failed, short and fixed ("limit",
      * "abandoned", "entitlement"...), for the launch stats. */
     char fail_code[16];
+    /* session.errorCode when NVIDIA ended the session ("1" = a clean end). */
+    char end_error_code[24];
     /* Queue ads NVIDIA asked for (free accounts), and those answered. */
     bool ads_required;
     unsigned ads_answered;
@@ -180,3 +184,5 @@ bool gfn_has_session(const GfnClient *client);
 const char *gfn_bearer_token(const GfnClient *client);
 /* Forget tokens in memory and delete the saved login from the SD card. */
 void gfn_sign_out(GfnClient *client);
+/* Renews the NVIDIA login if it runs out within ten minutes. */
+bool gfn_keep_login(GfnClient *client);

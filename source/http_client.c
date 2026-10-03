@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "diagnostic.h"
+
 extern const unsigned char _binary_romfs_cacert_pem_start[];
 extern const unsigned char _binary_romfs_cacert_pem_end[];
 /* Main-thread requests only. Keep a bounded connection/TLS cache between calls. */
@@ -151,11 +153,32 @@ bool http_request(const char *method, const char *url, const char *user_agent,
     }
 
     const CURLcode result = curl_easy_perform(curl);
+    /* Only the host is logged: paths and queries can hold session IDs. */
+    char host[64] = "";
+    {
+        const char *start = strstr(url, "://");
+        start = start ? start + 3 : url;
+        size_t length = strcspn(start, "/?:");
+        if (length >= sizeof(host)) length = sizeof(host) - 1;
+        memcpy(host, start, length);
+        host[length] = '\0';
+    }
     if (result == CURLE_OK) {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response->status);
         response->body = buffer.data;
         response->size = buffer.size;
+        /* A server falling over is NVIDIA's problem, but a new one we have
+         * not seen means some call is malformed or a route moved. */
+        if (response->status >= 500)
+            diagnostic_flag("http-5xx", "%s %s -> %ld (%lu bytes)", method, host, response->status,
+                            (unsigned long)buffer.size);
     } else {
+        /* Certificate and TLS failures are ours to fix (an expired CA
+         * bundle, a server changing its chain); timeouts and DNS are Wi-Fi. */
+        if (result == CURLE_SSL_CONNECT_ERROR || result == CURLE_PEER_FAILED_VERIFICATION ||
+            result == CURLE_SSL_CACERT_BADFILE || result == CURLE_SSL_CERTPROBLEM ||
+            result == CURLE_SSL_CIPHER || result == CURLE_SSL_ISSUER_ERROR)
+            diagnostic_flag("tls-error", "%s %s: %s", method, host, curl_easy_strerror(result));
         snprintf(response->error, sizeof(response->error), "%s",
                  result == CURLE_ABORTED_BY_CALLBACK ? "Cancelled" : curl_easy_strerror(result));
         /* How much arrived before it stopped (the connection check uses it

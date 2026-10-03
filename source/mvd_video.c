@@ -17,6 +17,7 @@ static unsigned char *g_input;
 static u16 *g_output;
 static MVDSTD_Config g_config;
 static unsigned g_frames, g_errors;
+static bool g_picture_dark;
 static unsigned g_input_width, g_input_height;
 static unsigned g_output_width, g_output_height, g_output_alloc_height;
 static unsigned g_zoom_level;
@@ -95,7 +96,7 @@ static void record_performance(u64 process_ticks, u64 render_ticks, u64 copy_tic
     if (process_ticks > g_perf_process_max) g_perf_process_max = process_ticks;
     if (render_ticks > g_perf_render_max) g_perf_render_max = render_ticks;
     if (copy_ticks > g_perf_copy_max) g_perf_copy_max = copy_ticks;
-    if (++g_perf_samples < 120) return;
+    if (++g_perf_samples < 600) return; /* ~20 s */
 
     const u64 ticks_per_us = SYSCLOCK_ARM11 / 1000000u;
     diagnostic_log("MVD", "perf frames=%u process avg/max=%llu/%llu us render avg/max=%llu/%llu us copy avg/max=%llu/%llu us",
@@ -116,6 +117,7 @@ bool mvd_video_init(unsigned input_width, unsigned input_height)
     mvd_video_close();
     g_frames = 0;
     g_errors = 0;
+    g_picture_dark = false;
     g_input_width = input_width;
     g_input_height = input_height;
     /* At 720p, render into a full-size linear surface before scaling to the
@@ -623,7 +625,7 @@ static bool decode_access_unit(const unsigned char *annex_b, unsigned char *inpu
             snprintf(g_status, sizeof(g_status), "720p MVD did not consume IDR; use 540p");
         else
             snprintf(g_status, sizeof(g_status), "MVD process %08lX AU %lu", (unsigned long)rc, (unsigned long)size);
-        diagnostic_log("MVD", "%s", g_status);
+        diagnostic_flag("decoder-fatal", "%s", g_status);
         diagnostic_log("MVD", "decoder submissions stopped after fatal process error");
         diagnostic_checkpoint();
         return false;
@@ -673,7 +675,7 @@ static bool decode_access_unit(const unsigned char *annex_b, unsigned char *inpu
     if (rc != MVD_STATUS_OK) {
         ++g_errors;
         snprintf(g_status, sizeof(g_status), "MVD render %08lX", (unsigned long)rc);
-        diagnostic_log("MVD", "%s", g_status);
+        diagnostic_flag("decoder-render", "%s", g_status);
         return false;
     }
     /* The CPU only reads the output for the periodic log and for the
@@ -708,12 +710,20 @@ static bool decode_access_unit(const unsigned char *annex_b, unsigned char *inpu
     record_performance(process_ticks, render_ticks, copy_ticks);
     ++g_frames;
     snprintf(g_status, sizeof(g_status), "MVD decoded frame %u", g_frames);
+    /* Brightness is sampled every frame; checked every 120 (~4 s). A
+     * picture going black then the session ending is how a game quitting
+     * looks (beta.27 report GTXMTY), so that is logged when it happens. */
     if (g_frames <= 5 || g_frames % 120 == 0) {
-        diagnostic_log("MVD", "%s status=%08lX sampleNonzero=%u hash=%08lx",
-                       g_status, (unsigned long)rc, nonzero, (unsigned long)sample_hash);
-        diagnostic_log("MVD", "levels green min=%u max=%u output=%ux%u wide=%u",
-                       g_level_min, g_level_max, g_output_width, g_output_height,
-                       g_wide ? 1 : 0);
+        const bool dark = g_level_max < 24;
+        if (g_frames <= 5 || g_frames % 600 == 0 || dark != g_picture_dark) {
+            diagnostic_log("MVD", "%s status=%08lX sampleNonzero=%u hash=%08lx",
+                           g_status, (unsigned long)rc, nonzero, (unsigned long)sample_hash);
+            diagnostic_log("MVD", "levels green min=%u max=%u output=%ux%u wide=%u%s",
+                           g_level_min, g_level_max, g_output_width, g_output_height,
+                           g_wide ? 1 : 0, g_frames <= 5 ? "" : dark ? " picture went dark" :
+                           dark != g_picture_dark ? " picture back" : "");
+        }
+        if (g_frames > 5) g_picture_dark = dark;
         g_level_min = 255;
         g_level_max = 0;
     }
@@ -781,7 +791,7 @@ bool mvd_video_submit(const unsigned char *annex_b, size_t size)
     if (size > capacity) {
         ++g_errors;
         snprintf(g_status, sizeof(g_status), "MVD AU too large: %lu", (unsigned long)size);
-        diagnostic_log("MVD", "%s", g_status);
+        diagnostic_flag("au-too-large", "%s (capacity %lu)", g_status, (unsigned long)capacity);
         return false;
     }
     if (g_await_idr) {
@@ -804,7 +814,13 @@ bool mvd_video_submit(const unsigned char *annex_b, size_t size)
         ++g_errors;
         g_resync_requested = true;
         g_await_idr = true;
-        diagnostic_log("MVD", "decoder queue full; waiting for IDR");
+        /* The first keyframe waits ~0.5 s for the decoder to set itself up,
+         * so the queue fills once at every stream start: normal, not a bug
+         * (beta.28 report HPSV3B, a clean session). */
+        if (g_frames)
+            diagnostic_flag("decoder-backlog", "decoder queue full; waiting for IDR (frame %u)", g_frames);
+        else
+            diagnostic_log("MVD", "queue full while the decoder starts; waiting for IDR");
         return false;
     }
     const unsigned slot = (g_queue_head + g_queue_count) % AU_SLOTS;
@@ -870,4 +886,5 @@ void mvd_video_decode_totals(unsigned long long *sum_us, unsigned *count, unsign
     if (reset_max) g_decode_max_us = 0;
 }
 unsigned mvd_video_errors(void) { return g_errors; }
+bool mvd_video_picture_dark(void) { return g_picture_dark; }
 const char *mvd_video_status(void) { return g_status; }

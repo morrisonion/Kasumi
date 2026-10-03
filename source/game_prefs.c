@@ -28,15 +28,30 @@ static int read_int(json_t *e, const char *key)
     return json_is_integer(v) ? (int)json_integer_value(v) : -1;
 }
 
+GamePrefs game_prefs_none(void)
+{
+    return (GamePrefs){ .bitrate = -1, .gyro = -1, .layout = -1, .camera_speed = -1, .camera_invert = -1,
+                        .gyro_speed = -1 };
+}
+
+bool game_prefs_custom(const GamePrefs *prefs)
+{
+    return prefs->bitrate >= 0 || prefs->gyro >= 0 || prefs->layout >= 0 || prefs->camera_speed >= 0 ||
+           prefs->camera_invert >= 0 || prefs->gyro_speed >= 0 || prefs->has_map;
+}
+
 GamePrefs game_prefs_get(const char *app_id)
 {
-    GamePrefs prefs = { false, -1, -1, -1, false, { 0 } };
+    GamePrefs prefs = game_prefs_none();
     json_t *e = g_prefs && app_id ? json_object_get(g_prefs, app_id) : NULL;
     if (!json_is_object(e)) return prefs;
     prefs.favourite = json_is_true(json_object_get(e, "fav"));
     prefs.bitrate = read_int(e, "bitrate");
     prefs.gyro = read_int(e, "gyro");
     prefs.layout = read_int(e, "layout");
+    prefs.camera_speed = read_int(e, "camera_speed");
+    prefs.camera_invert = read_int(e, "camera_invert");
+    prefs.gyro_speed = read_int(e, "gyro_speed");
     json_t *map = json_object_get(e, "map");
     if (json_is_array(map) && json_array_size(map) == sizeof(prefs.map)) {
         prefs.has_map = true;
@@ -49,13 +64,16 @@ GamePrefs game_prefs_get(const char *app_id)
 void game_prefs_set(const char *app_id, const GamePrefs *prefs)
 {
     if (!g_prefs || !app_id || !app_id[0]) return;
-    const bool empty = !prefs->favourite && prefs->bitrate < 0 && prefs->gyro < 0 && prefs->layout < 0 &&
-                       !prefs->has_map;
+    const bool empty = !prefs->favourite && !game_prefs_custom(prefs);
     if (empty) {
         json_object_del(g_prefs, app_id);
     } else {
         json_t *entry = json_pack("{s:b,s:i,s:i,s:i}", "fav", prefs->favourite, "bitrate", prefs->bitrate,
                                   "gyro", prefs->gyro, "layout", prefs->layout);
+        /* Newer options only when set, so older builds read the file as before. */
+        if (prefs->camera_speed >= 0) json_object_set_new(entry, "camera_speed", json_integer(prefs->camera_speed));
+        if (prefs->camera_invert >= 0) json_object_set_new(entry, "camera_invert", json_integer(prefs->camera_invert));
+        if (prefs->gyro_speed >= 0) json_object_set_new(entry, "gyro_speed", json_integer(prefs->gyro_speed));
         if (prefs->has_map) {
             json_t *map = json_array();
             for (size_t i = 0; i < sizeof(prefs->map); ++i) json_array_append_new(map, json_integer(prefs->map[i]));

@@ -100,13 +100,15 @@ enum { SETTING_LAYOUT, SETTING_TRIGGERS, SETTING_DEADZONE, SETTING_POINTER,
        SETTING_THEME, SETTING_VOLUME, SETTING_MENU_AUDIO, SETTING_LID,
        SETTING_CONNECTION, SETTING_NETWORK, SETTING_SERVER, SETTING_GUIDE, SETTING_REPORT, SETTING_SHARE, SETTING_SHARE_STATS,
        SETTING_UPDATES, SETTING_AUTO_UPDATE, SETTING_UPDATE_CHANNEL,
-       SETTING_PROVIDER, SETTING_ACCOUNT, SETTING_COMMUNITY, SETTING_COUNT };
+       SETTING_PROVIDER, SETTING_ACCOUNT, SETTING_COMMUNITY, SETTING_MUSIC, SETTING_VOICE, SETTING_SFX,
+       SETTING_CAMERA_SPEED, SETTING_CAMERA_INVERT, SETTING_COUNT };
 
 /* Library tabs (L / R). */
 enum { LIBRARY_TAB_ALL, LIBRARY_TAB_FAVOURITES, LIBRARY_TAB_RECENT, LIBRARY_TAB_COUNT };
 
 /* Per-game options sheet rows. */
-enum { OPTION_BITRATE, OPTION_GYRO, OPTION_LAYOUT, OPTION_MAPPING, OPTION_CONNECTION, OPTION_COUNT };
+enum { OPTION_BITRATE, OPTION_CAMERA_SPEED, OPTION_CAMERA_INVERT, OPTION_GYRO, OPTION_GYRO_SPEED, OPTION_LAYOUT,
+       OPTION_MAPPING, OPTION_CONNECTION, OPTION_COUNT };
 
 #define GUIDE_PAGES 5
 
@@ -185,6 +187,8 @@ typedef struct {
     /* The signalling said the session is gone: one check with CloudMatch
      * (it may only be paused) before giving up. */
     bool recover_tried;
+    /* This session's [END] line is written (see log_session_end). */
+    bool end_logged;
     /* Automatic retries of a connection that failed before the first frame. */
     unsigned setup_retries;
     /* Launch waiting for NVIDIA to free the slot: give up at `until`, next

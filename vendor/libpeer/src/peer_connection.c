@@ -127,7 +127,7 @@ static uint32_t peer_connection_nack_interval_ms(PeerConnection* pc) {
   const int rtt = agent_get_rtt_ms(&pc->agent);
   uint32_t interval = rtt > 0 ? (uint32_t)rtt + 20 : 60;
   if (interval < 40) interval = 40;
-  if (interval > 300) interval = 300;
+  if (interval > 600) interval = 600;
   return interval;
 }
 
@@ -590,7 +590,7 @@ static int peer_connection_read_dtls(PeerConnection* pc) {
   if (ret > 0) {
     pc->sctp_read_events++;
     if (peer_connection_diagnostics_enabled &&
-        (pc->sctp_read_events <= 10 || pc->sctp_read_events % 600 == 0)) {
+        pc->sctp_read_events <= 10) {
       char sctp_preview[64];
       peer_connection_hex_preview(pc->temp_buf, ret, sctp_preview, sizeof(sctp_preview));
       peer_connection_diag_log("dtls_read_appdata ret=%d sctpEvents=%d preview=%s",
@@ -601,7 +601,7 @@ static int peer_connection_read_dtls(PeerConnection* pc) {
     peer_connection_diag_log("dtls_peer_close_notify packets=%d sctpConnected=%d",
                              pc->completed_dtls_packets, sctp_is_connected(&pc->sctp));
     STATE_CHANGED(pc, PEER_CONNECTION_CLOSED);
-  } else if (ret < 0 && (pc->completed_dtls_packets <= 10 || pc->completed_dtls_packets % 600 == 0)) {
+  } else if (ret < 0 && pc->completed_dtls_packets <= 10) {
     peer_connection_diag_log("dtls_read_no_appdata ret=%d dtlsPackets=%d",
                              ret, pc->completed_dtls_packets);
   }
@@ -724,7 +724,7 @@ int peer_connection_loop(PeerConnection* pc) {
           pc->dtls_pending = 1;
           pc->completed_dtls_packets++;
           if (peer_connection_diagnostics_enabled &&
-              (pc->completed_dtls_packets <= 10 || pc->completed_dtls_packets % 600 == 0)) {
+              pc->completed_dtls_packets <= 10) {
             char preview[64];
             peer_connection_hex_preview(pc->agent_buf, pc->agent_ret, preview, sizeof(preview));
             peer_connection_diag_log("udp_class=dtls count=%d bytes=%d preview=%s",
@@ -738,7 +738,7 @@ int peer_connection_loop(PeerConnection* pc) {
           LOGD("Got RTCP packet");
           pc->completed_rtcp_packets++;
           if (peer_connection_diagnostics_enabled &&
-              (pc->completed_rtcp_packets <= 5 || pc->completed_rtcp_packets % 600 == 0)) {
+              pc->completed_rtcp_packets <= 5) {
             char preview[64];
             peer_connection_hex_preview(pc->agent_buf, pc->agent_ret, preview, sizeof(preview));
             peer_connection_diag_log("udp_class=rtcp count=%d bytes=%d preview=%s",
@@ -760,7 +760,7 @@ int peer_connection_loop(PeerConnection* pc) {
           pc->completed_rtp_packets++;
 
           if (peer_connection_diagnostics_enabled &&
-              (pc->completed_rtp_packets <= 10 || pc->completed_rtp_packets % 1200 == 0)) {
+              pc->completed_rtp_packets <= 10) {
             char preview[64];
             peer_connection_hex_preview(pc->agent_buf, pc->agent_ret, preview, sizeof(preview));
             peer_connection_diag_log("udp_class=rtp count=%d bytes=%d preview=%s",

@@ -40,11 +40,19 @@ typedef struct {
     bool sharpen;
     GfnGyroMode gyro_mode;
     unsigned gyro_speed;
+    /* C-Stick speed and inversion (GfnInputConfig). */
+    unsigned camera_speed;
+    unsigned camera_invert;
     /* Appearance and audio. */
     unsigned theme;
     /* Stream volume in steps of 20 %: 0 = mute ... 5 = 100 %. */
     unsigned volume;
     bool mute_in_menus;
+    /* Menu music (MenuMusicMode) and Tsumugi's voice lines. */
+    unsigned music_mode;
+    bool voice_cues;
+    /* Menu sound effects (sfx.h). */
+    bool sound_effects;
     /* Closing the lid mid-game (LID_*): pause with the connection kept,
      * sleep and reconnect on opening, or keep playing with the screens off. */
     unsigned lid_mode;

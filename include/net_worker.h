@@ -36,7 +36,9 @@ typedef enum {
     NET_JOB_CLAIM_CONFLICT,
     NET_JOB_END_CONFLICT,
     /* The stream dropped: ask NVIDIA about the session, RESUME if paused. */
-    NET_JOB_RECOVER
+    NET_JOB_RECOVER,
+    /* Renew the login before it runs out (in a game too). */
+    NET_JOB_KEEP_LOGIN
 } NetJobKind;
 
 typedef struct {

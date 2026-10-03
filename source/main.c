@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "app.h"
 #include "app_paths.h"
@@ -14,6 +15,8 @@
 #include "diagnostic.h"
 #include "game_art.h"
 #include "game_prefs.h"
+#include "menu_audio.h"
+#include "sfx.h"
 #include "queue_alert.h"
 #include "regions.h"
 #include "report.h"
@@ -60,6 +63,8 @@ static bool g_leave_pending;
 static u64 g_limit_last_try;
 static bool g_screenshot_requested;
 static void show_notice(const char *text);
+static void finish_history(void);
+static void log_session_end(const char *by);
 static void apply_game_options(const GamePrefs *prefs);
 static void launch_with_options(const GfnGame *base, unsigned variant);
 /* Main-loop health while streaming: the longest iteration and how many took
@@ -268,7 +273,9 @@ static void render_wide_video(bool draw_bottom)
     const u64 ticks = svcGetSystemTick() - start;
     present_ticks += ticks;
     if (ticks > present_max) present_max = ticks;
-    if (++presented - last_log_frames >= 120) {
+    /* Every 600 frames (~20 s), sooner when frames were repeated or skipped. */
+    const unsigned pending_frames = ++presented - last_log_frames;
+    if (pending_frames >= 600 || (pending_frames >= 120 && (repeated > 6 || skipped > 3))) {
         const u64 per_us = SYSCLOCK_ARM11 / 1000000u;
         const unsigned frames = presented - last_log_frames;
         diagnostic_log("VIDEO", "paced present frames=%u avg/max=%llu/%llu us repeated=%u skipped=%u drained=%u quiet=%u depth=%u.%02u reserve=%u loopMax=%u slow=%u",
@@ -310,8 +317,18 @@ static void render(bool draw_bottom)
 
 static void show_notice(const char *text)
 {
+    /* What the player was told belongs in the log: reports showed the
+     * internals but not the words on screen. Repeats within 10 s skip it. */
+    static u64 logged_at;
+    const u64 now = osGetTime();
+    if (strcmp(g_notice, text) || now - logged_at >= 10000) {
+        diagnostic_log("UI", "notice: %.90s", text);
+        logged_at = now;
+    }
+    /* The wind chime, in the menus only: never over a game's own sound. */
+    if (g_app.view != VIEW_STREAM && strcmp(g_notice, text)) sfx_play(SFX_NOTICE);
     snprintf(g_notice, sizeof(g_notice), "%s", text);
-    g_notice_until = osGetTime() + 4000;
+    g_notice_until = now + 4000;
 }
 
 /* A job asked for while the worker ran background work (stats upload,
@@ -329,7 +346,7 @@ static struct {
 
 static bool background_job(NetJobKind kind)
 {
-    return kind == NET_JOB_SEND_STATS || kind == NET_JOB_UPDATE_CHECK;
+    return kind == NET_JOB_SEND_STATS || kind == NET_JOB_UPDATE_CHECK || kind == NET_JOB_KEEP_LOGIN;
 }
 
 /* Hand a blocking call to the network worker; the UI keeps animating. */
@@ -366,6 +383,8 @@ static void run_deferred_job(void)
 
 static void open_modal(AppModal modal, const char *jp, const char *title, const char *text)
 {
+    if (text && text[0]) diagnostic_log("UI", "modal %d %s: %.200s", (int)modal, title, text);
+    else diagnostic_log("UI", "modal %d %s", (int)modal, title);
     g_app.modal = modal;
     snprintf(g_app.modal_jp, sizeof(g_app.modal_jp), "%s", jp);
     snprintf(g_app.modal_title, sizeof(g_app.modal_title), "%s", title);
@@ -483,6 +502,7 @@ static void prepare_game_session(const GfnGame *game)
     g_app.auto_weak = false;
     g_app.recover_tried = false;
     g_app.setup_retries = 0;
+    g_app.end_logged = false;
     if (!g_app.settings.net_weak && net_memory_choppy_here()) {
         stream_profile_set_weak(true);
         g_app.auto_weak = true;
@@ -517,6 +537,7 @@ static void launch_game(const GfnGame *game)
     g_app.limit_unclosable = g_app.limit_rate = false;
     launch_begin(false, stream_profile_weak(), g_app.auto_weak);
     submit_job(NET_JOB_START_SESSION, "Creating your cloud session...", NULL, &g_current_game);
+    if (g_app.settings.voice_cues) menu_audio_cue(MENU_CUE_ITTERASSHAI);
 }
 
 static void release_stream_input(void)
@@ -539,6 +560,7 @@ static void close_media(void)
 static void leave_session(void)
 {
     diagnostic_log("APP", "user left the session");
+    log_session_end("user");
     g_perf.user_left = true;
     launch_end("cancel", launch_share_id());
     g_app.limit_wait_until = g_app.limit_retry_at = 0;
@@ -576,6 +598,16 @@ static void retry_session(void)
     if (!dead)
         submit_job(NET_JOB_RECOVER, "Reconnecting to the cloud rig...", NULL, &g_current_game);
     else if (g_current_game.app_id[0]) {
+        /* A new session: its play time, summary and history start again.
+         * Beta.27 kept the first session's start time, so a relaunched
+         * game "ended after 600 s" when it had run for 20. */
+        log_session_end(g_app.stream_started_at ? "restart" : "restart-before-stream");
+        finish_history();
+        if (g_perf.active) perf_end(g_app.settings.install_id);
+        g_app.stream_started_at = 0;
+        g_app.setup_retries = 0;
+        g_app.recover_tried = false;
+        g_app.end_logged = false;
         launch_begin(false, stream_profile_weak(), g_app.auto_weak);
         submit_job(NET_JOB_RESTART_SESSION, "Restarting your cloud session...", NULL, &g_current_game);
     }
@@ -811,7 +843,8 @@ static void handle_modal(u32 down, AppAction action)
              * start as for any ready session. */
             prepare_game_session(&g_client.resume_game);
             launch_begin(true, stream_profile_weak(), g_app.auto_weak);
-            apply_game_options(&(GamePrefs){ .bitrate = -1, .gyro = -1, .layout = -1 });
+            const GamePrefs none = game_prefs_none();
+            apply_game_options(&none);
             const GamePrefs prefs = game_prefs_get(g_current_game.app_id);
             apply_game_options(&prefs);
             diagnostic_log("APP", "resuming %s", g_current_game.title);
@@ -1038,6 +1071,9 @@ static void apply_game_options(const GamePrefs *prefs)
         session.bitrate_mode = (StreamBitrateMode)prefs->bitrate;
     if (prefs->gyro >= 0 && prefs->gyro < GFN_GYRO_MODE_COUNT) session.gyro_mode = (GfnGyroMode)prefs->gyro;
     if (prefs->layout >= 0 && prefs->layout < 2) session.button_layout = (GfnButtonLayout)prefs->layout;
+    if (prefs->camera_speed >= 0 && prefs->camera_speed < 4) session.camera_speed = (unsigned)prefs->camera_speed;
+    if (prefs->camera_invert >= 0 && prefs->camera_invert < 3) session.camera_invert = (unsigned)prefs->camera_invert;
+    if (prefs->gyro_speed >= 0 && prefs->gyro_speed < 3) session.gyro_speed = (unsigned)prefs->gyro_speed;
     settings_apply_input(&session);
     settings_apply_picture(&session);
     /* What this game really streams with (a beta.25 test logged Sharp, then
@@ -1054,6 +1090,20 @@ static void apply_game_options(const GamePrefs *prefs)
     if (prefs->has_map) gfn_input_set_custom_map(prefs->map);
 }
 
+/* Settings changed mid-game (the stream menu's gyro switch): apply them
+ * again, keeping this game's own camera and gyro speeds. */
+static void apply_session_input(void)
+{
+    AppSettings session = g_app.settings;
+    const GamePrefs *p = &g_session_prefs;
+    if (gfn_session_active(&g_client)) {
+        if (p->camera_speed >= 0 && p->camera_speed < 4) session.camera_speed = (unsigned)p->camera_speed;
+        if (p->camera_invert >= 0 && p->camera_invert < 3) session.camera_invert = (unsigned)p->camera_invert;
+        if (p->gyro_speed >= 0 && p->gyro_speed < 3) session.gyro_speed = (unsigned)p->gyro_speed;
+    }
+    settings_apply_input(&session);
+}
+
 /* Launch a library game from one of its stores, with its own options. */
 static void launch_with_options(const GfnGame *base, unsigned variant)
 {
@@ -1067,7 +1117,8 @@ static void launch_with_options(const GfnGame *base, unsigned variant)
     launch_game(&game);
     /* launch_game applied the global picture settings; layer this game's. */
     apply_game_options(&prefs);
-    diagnostic_log("APP", "game options bitrate=%d gyro=%d layout=%d map=%d", prefs.bitrate, prefs.gyro,
+    diagnostic_log("APP", "game options bitrate=%d gyro=%d gyroSpeed=%d camera=%d invert=%d layout=%d map=%d",
+                   prefs.bitrate, prefs.gyro, prefs.gyro_speed, prefs.camera_speed, prefs.camera_invert,
                    prefs.layout, prefs.has_map);
 }
 
@@ -1134,6 +1185,9 @@ static void handle_options(u32 down, u32 repeat, AppAction action)
     case OPTION_BITRATE: CYCLE(prefs.bitrate, STREAM_BITRATE_COUNT); break;
     case OPTION_GYRO: CYCLE(prefs.gyro, GFN_GYRO_MODE_COUNT); break;
     case OPTION_LAYOUT: CYCLE(prefs.layout, 2); break;
+    case OPTION_CAMERA_SPEED: CYCLE(prefs.camera_speed, 4); break;
+    case OPTION_CAMERA_INVERT: CYCLE(prefs.camera_invert, 3); break;
+    case OPTION_GYRO_SPEED: CYCLE(prefs.gyro_speed, 3); break;
     case OPTION_MAPPING:
         if ((down & KEY_A) || action == ACTION_OPTION_NEXT || action == ACTION_OPTION_PREV) open_mapping(game, &prefs);
         return;
@@ -1188,6 +1242,7 @@ static void handle_settings(u32 down, u32 repeat, AppAction action)
     if (repeat & KEY_DOWN) g_app.setting_index = (g_app.setting_index + 1) % SETTING_COUNT;
     if ((repeat & KEY_LEFT) || action == ACTION_VALUE_PREV) change_setting(-1);
     if ((repeat & KEY_RIGHT) || (down & KEY_A) || action == ACTION_VALUE_NEXT) change_setting(1);
+    if ((down & KEY_X) && screens_setting_at(g_app.setting_index) == SETTING_MUSIC) menu_audio_next();
     if ((down & (KEY_B | KEY_SELECT)) || action == ACTION_BACK) {
         if (action == ACTION_BACK && screens_setting_at(g_app.setting_index) == SETTING_ACCOUNT &&
             gfn_has_session(&g_client)) {
@@ -1283,7 +1338,7 @@ static void handle_stream(u32 down, u32 held, AppAction action, bool touch_down,
             g_app.sound_muted = !g_app.sound_muted;
         } else if (action == ACTION_MENU_GYRO) {
             screens_setting_change(&g_app, SETTING_GYRO, 1);
-            settings_apply_input(&g_app.settings);
+            apply_session_input();
             reapply_game_map();
             save_settings();
         } else if (action == ACTION_MENU_LAYOUT) {
@@ -1303,6 +1358,8 @@ static void handle_stream(u32 down, u32 held, AppAction action, bool touch_down,
         return;
     case ACTION_STREAM_POINTER:
         webrtc_transport_set_pointer_mode(&g_transport, !g_transport.pointer_mode);
+        show_notice(g_transport.pointer_mode ? "Mouse & keyboard mode: drag to move the mouse, tap or A to click"
+                                             : "Controller mode: buttons and sticks act as a gamepad");
         return;
     case ACTION_STREAM_ZOOM:
         /* With saved zones, ZOOM steps through them (then back to full). */
@@ -1352,9 +1409,14 @@ static volatile u64 g_suspended_at, g_resumed_at;
 static volatile bool g_suspend_was_sleep;
 static aptHookCookie g_apt_cookie;
 
+/* Any HOME, sleep or applet event: a long main-loop gap around one is not
+ * a stall (see watch_for_bugs). */
+static volatile unsigned g_apt_events;
+
 static void apt_hook(APT_HookType hook, void *param)
 {
     (void)param;
+    ++g_apt_events;
     if (hook == APTHOOK_ONSLEEP || hook == APTHOOK_ONSUSPEND) {
         webrtc_transport_pause(true);
         g_suspended_at = osGetTime();
@@ -1542,6 +1604,7 @@ static void track_session(void)
     char shot[64];
     const int shot_result = screenshot_poll(shot, sizeof(shot));
     if (shot_result > 0) {
+        sfx_play(SFX_SCREENSHOT);
         char text[96];
         snprintf(text, sizeof(text), "Screenshot saved: %s", shot);
         show_notice(text);
@@ -1573,6 +1636,7 @@ static void track_session(void)
         /* A game's own options only last for its session. */
         if (was_active) {
             was_active = false;
+            g_session_prefs = game_prefs_none();
             settings_apply_input(&g_app.settings);
             settings_apply_picture(&g_app.settings);
         }
@@ -1653,8 +1717,9 @@ static void track_session(void)
                         last_frame && now > last_frame && now - last_frame > 12000 &&
                         !g_app.lid_paused && !g_resumed_at && wifi_connected();
     if (frozen && !net_worker_busy() && g_client.session_state == GFN_SESSION_READY && g_app.reconnect_attempt < 3) {
-        diagnostic_log("APP", "video frozen for %llu ms; reconnecting",
-                       (unsigned long long)(now - g_transport.last_decoded_frame_at));
+        diagnostic_flag("video-freeze", "no picture for %llu ms with the connection up (rtp=%u kbps=%u pli=%u); reconnecting",
+                        (unsigned long long)(now - g_transport.last_decoded_frame_at),
+                        g_transport.video_access_units, g_transport.video_kbps, g_transport.keyframe_requests);
         g_transport.last_decoded_frame_at = now;
         ++g_app.reconnect_attempt;
         reconnect_at = now;
@@ -1663,7 +1728,20 @@ static void track_session(void)
         retry_session();
         return;
     }
-    const bool dropped = g_transport.state == WEBRTC_FAILED || g_signal.state == NVST_SIGNAL_ERROR;
+    /* NVIDIA closing the signalling mid-game (websocket close 1000) took
+     * the stream down 60-120 s later in beta.27 report SAFA4K, and nothing
+     * reconnected. Reconnect while the rig is still ours. */
+    static u64 signal_closed_at;
+    if (g_signal.state == NVST_SIGNAL_CLOSED && g_app.stream_started_at) {
+        if (!signal_closed_at) {
+            signal_closed_at = now;
+            diagnostic_log("APP", "signalling closed mid-stream (%.80s)", g_signal.status);
+        }
+    } else {
+        signal_closed_at = 0;
+    }
+    const bool signal_lost = signal_closed_at && now - signal_closed_at >= 3000;
+    const bool dropped = g_transport.state == WEBRTC_FAILED || g_signal.state == NVST_SIGNAL_ERROR || signal_lost;
     static u64 wifi_wait_since, wifi_back_at;
     if (!dropped) {
         g_app.waiting_wifi = false;
@@ -1685,6 +1763,7 @@ static void track_session(void)
             return;
         }
         diagnostic_log("APP", "session ended on NVIDIA's side (HTTP %d); not reconnecting", g_signal.upgrade_http);
+        log_session_end("nvidia-gone");
         queue_auto_report("session-ended");
         perf_note_error("session-ended");
         g_app.reconnect_attempt = 4;
@@ -1719,6 +1798,7 @@ static void track_session(void)
         /* Three tries failed: hand the choice back to the player. */
         if (now - reconnect_at >= 8000) {
             g_app.reconnect_attempt = 4;
+            log_session_end("reconnect-failed");
             queue_auto_report("reconnect-failed");
             perf_note_error("reconnect-failed");
         }
@@ -1924,8 +2004,10 @@ static void tick_network(void)
                                    g_client.media_ip[0] ? g_client.media_ip : g_client.server_ip,
                                    g_client.media_port)) {
             g_transport.prefer_partial_input = g_app.settings.fast_input;
-            if (g_app.genshin_session && g_app.settings.auto_pointer)
+            if (g_app.genshin_session && g_app.settings.auto_pointer) {
                 webrtc_transport_set_pointer_mode(&g_transport, true);
+                show_notice("Mouse & keyboard mode for the login. Tap MOUSE for controller mode");
+            }
         }
     }
     webrtc_transport_tick(&g_transport, &g_signal);
@@ -1946,27 +2028,148 @@ static const char *current_status(void)
 
 /* ---- Diagnostic reports ---------------------------------------------------- */
 
-/* Automatic reports (Share diagnostics on): one per run, sent from the menus
- * once nothing else is happening, never during a game. */
-static const char *g_auto_trigger;
-static bool g_auto_sent, g_auto_inflight;
+/* Automatic reports (Share diagnostics on), sent from the menus once nothing
+ * else is happening, never during a game. Up to three a run: build 97 sent
+ * one, so a second, different problem in the same run never reached us.
+ * Reasons that pile up before a send go out together ("session-error+flag:x"),
+ * and a send waits a minute after the last reason so a cascade is one report. */
+#define AUTO_REPORTS_PER_RUN 3
+static char g_auto_trigger[72];
+static unsigned g_auto_sent;
+static bool g_auto_inflight;
+static u64 g_auto_queued_at;
 
 static void queue_auto_report(const char *trigger)
 {
-    if (g_auto_sent || g_auto_trigger || !report_available()) return;
-    g_auto_trigger = trigger;
+    if (g_auto_sent >= AUTO_REPORTS_PER_RUN || !report_available() || strstr(g_auto_trigger, trigger)) return;
+    const size_t used = strlen(g_auto_trigger);
+    if (used + strlen(trigger) + 2 > sizeof(g_auto_trigger)) return;
+    snprintf(g_auto_trigger + used, sizeof(g_auto_trigger) - used, "%s%s", used ? "+" : "", trigger);
+    g_auto_queued_at = osGetTime();
     diagnostic_log("REPORT", "automatic report queued (%s)", trigger);
 }
 
 static void auto_report_tick(void)
 {
-    if (!g_auto_trigger || g_auto_sent || g_app.settings.share_reports != SHARE_YES) return;
+    if (!g_auto_trigger[0] || g_auto_sent >= AUTO_REPORTS_PER_RUN || g_auto_inflight ||
+        g_app.settings.share_reports != SHARE_YES)
+        return;
     if ((g_app.view != VIEW_LIBRARY && g_app.view != VIEW_WELCOME) || gfn_session_active(&g_client) ||
-        net_worker_busy() || g_app.modal != MODAL_NONE)
+        net_worker_busy() || g_app.modal != MODAL_NONE || osGetTime() - g_auto_queued_at < 60000)
         return;
     if (submit_job(NET_JOB_SEND_REPORT, NULL, g_auto_trigger, NULL)) {
-        g_auto_sent = g_auto_inflight = true;
-        g_auto_trigger = NULL;
+        ++g_auto_sent;
+        g_auto_inflight = true;
+        g_auto_trigger[0] = '\0';
+    }
+}
+
+/* One line per session, written when it ends: who ended it and in what
+ * state, so a report can be read from its [END] lines first. */
+static void log_session_end(const char *by)
+{
+    if (g_app.end_logged) return;
+    g_app.end_logged = true;
+    const u64 now = osGetTime();
+    const u64 last = g_transport.last_decoded_frame_at;
+    diagnostic_log("END", "by=%s code=%s nvidia=%s played=%llus reconnects=%u frames=%u lastFrame=%lldms "
+                   "dark=%d kbps=%u pli=%u errors=%u state=%d status=%d game=\"%.40s\" msg=\"%.100s\"",
+                   by, g_client.fail_code[0] ? g_client.fail_code : "-",
+                   g_client.end_error_code[0] ? g_client.end_error_code : "-",
+                   (unsigned long long)(g_app.stream_started_at ? (now - g_app.stream_started_at) / 1000 : 0),
+                   g_perf.reconnects, mvd_video_decoded_frames() - g_app.stream_frame_base,
+                   last && now > last ? (long long)(now - last) : -1LL, mvd_video_picture_dark() ? 1 : 0,
+                   g_transport.video_kbps, g_transport.keyframe_requests, mvd_video_errors(),
+                   g_client.session_state, g_client.session_status, g_current_game.title, g_client.status);
+}
+
+/* Watchdogs for states that should never last: each raises a flag (see
+ * diagnostic_flag), and every new flag asks for an automatic report. */
+static void watch_for_bugs(void)
+{
+    const u64 now = osGetTime();
+    for (const char *code; (code = diagnostic_take_new_flag());) {
+        char trigger[40];
+        snprintf(trigger, sizeof(trigger), "flag:%.32s", code);
+        queue_auto_report(trigger);
+    }
+    /* A busy message that never clears: a job hung on the worker. */
+    static const char *busy_message;
+    static u64 busy_since;
+    static bool busy_flagged;
+    if (g_app.busy != busy_message) {
+        busy_message = g_app.busy;
+        busy_since = now;
+        busy_flagged = false;
+    } else if (busy_message && !busy_flagged && now - busy_since > 90000 &&
+               net_worker_current_job() != NET_JOB_UPDATE_INSTALL &&
+               net_worker_current_job() != NET_JOB_CONNECTION_TEST) {
+        busy_flagged = true;
+        diagnostic_flag("busy-stuck", "\"%.60s\" on screen for %llus (job %d)", busy_message,
+                        (unsigned long long)((now - busy_since) / 1000), (int)net_worker_current_job());
+    }
+    /* NVIDIA reports a place in line but the screen shows none (the queue
+     * lock in gfn_client; beta.27: a queue counter stuck at 0). */
+    static u64 hidden_since;
+    if (gfn_session_active(&g_client) && g_client.queue_reported > 0 && g_client.queue_position <= 0 &&
+        !g_app.stream_started_at) {
+        if (!hidden_since) hidden_since = now;
+        else if (now - hidden_since > 45000) {
+            diagnostic_flag("queue-hidden", "NVIDIA says place %d, screen shows %d (step=%d queueStep=%d) for %llus",
+                            g_client.queue_reported, g_client.queue_position, g_client.seat_setup_step,
+                            g_client.queue_step, (unsigned long long)((now - hidden_since) / 1000));
+            hidden_since = now;
+        }
+    } else {
+        hidden_since = 0;
+    }
+    /* Rig setup (not the queue) taking minutes. */
+    static u64 setup_since;
+    if (gfn_session_active(&g_client) && g_client.session_state == GFN_SESSION_SETUP && !g_app.stream_started_at) {
+        if (!setup_since) setup_since = now;
+        else if (now - setup_since > 300000) {
+            diagnostic_flag("setup-stuck", "rig setup for %llus (status %d, step %d): %.80s",
+                            (unsigned long long)((now - setup_since) / 1000), g_client.session_status,
+                            g_client.seat_setup_step, g_client.status);
+            setup_since = now;
+        }
+    } else {
+        setup_since = 0;
+    }
+    /* Signalling and media up, the stream never started. */
+    static u64 connect_since;
+    if (gfn_session_active(&g_client) && g_client.session_state == GFN_SESSION_READY && !g_app.stream_started_at &&
+        g_transport.state == WEBRTC_CONNECTED) {
+        if (!connect_since) connect_since = now;
+        else if (now - connect_since > 45000) {
+            diagnostic_flag("no-first-frame", "connected %llus without a picture (video AU=%u decoded=%u errors=%u)",
+                            (unsigned long long)((now - connect_since) / 1000), g_transport.video_access_units,
+                            mvd_video_decoded_frames(), mvd_video_errors());
+            connect_since = now;
+        }
+    } else {
+        connect_since = 0;
+    }
+    /* Opus packets the decoder refused (not lost ones: those are Wi-Fi). */
+    static unsigned audio_errors_flagged;
+    if (g_transport.audio_errors >= audio_errors_flagged + 25) {
+        audio_errors_flagged = g_transport.audio_errors;
+        diagnostic_flag("audio-decode", "%u audio packets failed to decode (%u decoded)", g_transport.audio_errors,
+                        g_transport.audio_decoded);
+    } else if (g_transport.audio_errors < audio_errors_flagged) {
+        audio_errors_flagged = g_transport.audio_errors;
+    }
+    /* Linear memory running out ends in a black screen or a crash. */
+    static u64 memory_checked;
+    static bool memory_flagged;
+    if (!memory_flagged && now - memory_checked > 10000) {
+        memory_checked = now;
+        const u32 free_bytes = linearSpaceFree();
+        if (free_bytes < 1536 * 1024) {
+            memory_flagged = true;
+            diagnostic_flag("low-memory", "linear free %lu KiB (view %d)", (unsigned long)(free_bytes / 1024),
+                            (int)g_app.view);
+        }
     }
 }
 
@@ -1985,6 +2188,26 @@ static void stats_tick(void)
     if (!report_stats_pending()) return;
     tried_at = now;
     if (submit_job(NET_JOB_SEND_STATS, NULL, NULL, NULL)) g_stats_inflight = true;
+}
+
+/* The NVIDIA login is renewed ten minutes before it runs out, during a game
+ * too. A long game used to outlast it and the renewal at its end could be
+ * refused: "it logged me out" after quitting from the game's own menu. */
+static void keep_login_tick(void)
+{
+    static u64 tried_at;
+    if (!gfn_has_session(&g_client) || net_worker_busy() || g_leave_pending || g_deferred.set) return;
+    const int64_t now_s = (int64_t)time(NULL);
+    const bool login_due = g_client.token_expires_at && g_client.token_expires_at - now_s <= 540;
+    const bool client_due = g_client.client_token[0] && g_client.client_token_expires_at - now_s <= 540;
+    if (!login_due && !client_due) return;
+    const u64 now = osGetTime();
+    if (tried_at && now - tried_at < 120000) return;
+    tried_at = now;
+    diagnostic_log("AUTH", "renewing in the background (login %llds, client token %llds left)",
+                   (long long)(g_client.token_expires_at - now_s),
+                   (long long)(g_client.client_token_expires_at - now_s));
+    submit_job(NET_JOB_KEEP_LOGIN, NULL, NULL, NULL);
 }
 
 /* Before the first frame, a failed connection (signalling refused, the
@@ -2021,6 +2244,7 @@ static void watch_session_errors(void)
     if (error && !was_error && g_app.free_tier_guess && g_app.stream_started_at &&
         osGetTime() - g_app.stream_started_at >= 58ull * 60 * 1000) {
         diagnostic_log("APP", "free session ended after its hour (%.80s)", g_client.status);
+        log_session_end("free-hour");
         snprintf(g_client.status, sizeof(g_client.status),
                  "Your free hour is over. Press A to start the game again (you may queue again).");
         perf_note_error("free-hour");
@@ -2034,12 +2258,19 @@ static void watch_session_errors(void)
         !strcmp(g_client.fail_code, "ended") && osGetTime() - g_app.stream_started_at >= 2ull * 60 * 1000) {
         diagnostic_log("APP", "session ended after %llus of play",
                        (unsigned long long)((osGetTime() - g_app.stream_started_at) / 1000));
+        log_session_end("nvidia");
         was_error = error;
         return;
     }
     if (error && !was_error) {
         diagnostic_log("APP", "session failed: %.120s", g_client.session_state == GFN_SESSION_ERROR ? g_client.status : g_signal.status);
-        queue_auto_report(g_app.stream_started_at ? "session-error" : "queue-or-setup-failed");
+        /* NVIDIA ending a short stream cleanly (errorCode 1) is mostly the
+         * game itself exiting (beta.27 report GTXMTY: the picture went black
+         * first). The END line keeps it; anything odd around it raises its
+         * own flag. */
+        const bool clean_end = !strcmp(g_client.fail_code, "ended") && !strcmp(g_client.end_error_code, "1");
+        log_session_end(clean_end ? "nvidia" : g_client.session_state == GFN_SESSION_ERROR ? "error" : "signalling");
+        if (!clean_end) queue_auto_report(g_app.stream_started_at ? "session-error" : "queue-or-setup-failed");
         perf_note_error("session-error");
         if (!g_app.stream_started_at)
             launch_end(g_client.session_state == GFN_SESSION_ERROR && g_client.fail_code[0] ? g_client.fail_code :
@@ -2158,7 +2389,12 @@ static void launch_failed(void)
         return;
     }
     open_modal(MODAL_ERROR, "起動失敗", "LAUNCH FAILED", g_client.status);
-    if (strcmp(g_client.fail_code, "limited")) queue_auto_report("launch-failed");
+    log_session_end("launch-failed");
+    /* NVIDIA's limited mode and an account without the game are not bugs
+     * (beta.27 report QQEN7S: five entitlement refusals, five reports). An
+     * answer we have no words for raises flag:unmapped-reason instead. */
+    if (strcmp(g_client.fail_code, "limited") && strcmp(g_client.fail_code, "entitlement"))
+        queue_auto_report("launch-failed");
     launch_end(g_client.fail_code[0] ? g_client.fail_code : "error", launch_share_id());
 }
 
@@ -2251,11 +2487,123 @@ static void finish_jobs(void)
     run_deferred_job();
 }
 
+/* ---- Menu sound effects ----------------------------------------------------- */
+
+/* What the player can see change. Compared from one loop to the next, so a
+ * button, a tap and a reply from the worker all get the same sound without
+ * every handler knowing about it. */
+typedef struct {
+    AppView view;
+    AppModal modal;
+    bool settings_open, details_open, options_open, mapping_open, update_open, whats_new_open;
+    bool stream_menu, controls_open, guide_open;
+    int library_tab, setting_index, options_index, stream_menu_index, guide_page, mapping_input;
+    size_t selected;
+    unsigned details_variant;
+    bool busy;
+    AppSettings settings;
+} UiState;
+
+static void ui_state(UiState *s)
+{
+    memset(s, 0, sizeof(*s));
+    s->view = g_app.view;
+    s->modal = g_app.modal;
+    s->settings_open = g_app.settings_open;
+    s->details_open = g_app.details_open;
+    s->options_open = g_app.options_open;
+    s->mapping_open = g_app.mapping_open;
+    s->update_open = g_app.update_open;
+    s->whats_new_open = g_app.whats_new_open;
+    s->stream_menu = g_app.stream_menu;
+    s->controls_open = g_app.controls_open;
+    s->guide_open = g_app.guide_page >= 0;
+    s->library_tab = g_app.library_tab;
+    s->setting_index = g_app.setting_index;
+    s->options_index = g_app.options_index;
+    s->stream_menu_index = g_app.stream_menu_index;
+    s->guide_page = g_app.guide_page;
+    s->mapping_input = g_app.mapping_input;
+    s->selected = g_app.selected;
+    s->details_variant = g_app.details_variant;
+    s->busy = g_app.busy != NULL;
+    s->settings = g_app.settings;
+}
+
+/* Overlays that open over the current view, as a bit set. */
+static unsigned ui_overlays(const UiState *s)
+{
+    return (s->settings_open ? 1u : 0) | (s->details_open ? 2u : 0) | (s->options_open ? 4u : 0) |
+           (s->mapping_open ? 8u : 0) | (s->update_open ? 16u : 0) | (s->whats_new_open ? 32u : 0) |
+           (s->stream_menu ? 64u : 0) | (s->controls_open ? 128u : 0) | (s->guide_open ? 256u : 0);
+}
+
+static void ui_sounds(u32 down, AppAction action)
+{
+    static UiState last;
+    static bool have_last;
+    UiState now;
+    ui_state(&now);
+    sfx_set_enabled(g_app.settings.sound_effects);
+    if (!have_last) {
+        last = now;
+        have_last = true;
+        return;
+    }
+    const UiState *was = &last;
+    const bool back = (down & KEY_B) || action == ACTION_BACK || action == ACTION_CANCEL;
+    /* In a game, only the stream menu and its sheets make sounds: the
+     * buttons belong to the game. */
+    const bool in_game = now.view == VIEW_STREAM && !now.stream_menu && !was->stream_menu &&
+                         !now.controls_open && !was->controls_open && now.modal == MODAL_NONE &&
+                         was->modal == MODAL_NONE;
+    const unsigned opened = ui_overlays(&now) & ~ui_overlays(was);
+    const unsigned closed = ui_overlays(was) & ~ui_overlays(&now);
+    int sound = -1;
+    if (in_game) {
+        sound = -1;
+    } else if (now.modal != was->modal) {
+        if (now.modal == MODAL_ERROR) sound = SFX_ERROR;
+        else if (now.modal != MODAL_NONE) sound = SFX_OPEN;
+        else sound = back ? SFX_BACK : SFX_SELECT;
+    } else if (opened) {
+        sound = SFX_OPEN;
+    } else if (closed) {
+        sound = back ? SFX_BACK : SFX_CLOSE;
+    } else if (now.library_tab != was->library_tab) {
+        sound = SFX_TAB;
+    } else if (memcmp(&now.settings, &was->settings, sizeof(now.settings))) {
+        const bool lower = (down & KEY_LEFT) || action == ACTION_VALUE_PREV || action == ACTION_OPTION_PREV ||
+                           action == ACTION_MAP_PREV || action == ACTION_VARIANT_PREV;
+        sound = lower ? SFX_TOGGLE_OFF : SFX_TOGGLE_ON;
+    } else if (now.selected != was->selected || now.setting_index != was->setting_index ||
+               now.options_index != was->options_index || now.stream_menu_index != was->stream_menu_index ||
+               now.guide_page != was->guide_page || now.mapping_input != was->mapping_input ||
+               now.details_variant != was->details_variant) {
+        sound = SFX_MOVE;
+    } else if (now.view != was->view && now.view != VIEW_STREAM && was->view != VIEW_STREAM) {
+        sound = back ? SFX_BACK : now.view == VIEW_LIBRARY && was->view == VIEW_SESSION ? -1 : SFX_SELECT;
+    } else if (now.busy && !was->busy && (down & KEY_A)) {
+        sound = SFX_SELECT;
+    } else if ((down & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT)) && now.modal == MODAL_NONE && !now.busy &&
+               (now.view == VIEW_LIBRARY || now.view == VIEW_SETTINGS || now.view == VIEW_DETAILS ||
+                now.stream_menu)) {
+        /* Pressed against the end of a list. */
+        sound = SFX_BUMP;
+    }
+    if (sound >= 0) sfx_play((Sfx)sound);
+    last = now;
+}
+
 static void log_session(void)
 {
     static u64 last;
-    /* Once video plays, every 5 s: long sessions must not flood the log. */
-    const u64 interval = g_app.view == VIEW_STREAM ? 5000 : 1000;
+    /* Every second while the rig is being set up and the stream connects;
+     * every 5 s otherwise (playing, queued, or an ended session waiting on
+     * the player), so long sessions do not flood the log. */
+    const bool connecting = g_client.session_state == GFN_SESSION_SETUP ||
+                            (g_client.session_state == GFN_SESSION_READY && g_app.view != VIEW_STREAM);
+    const u64 interval = connecting ? 1000 : 5000;
     if (!gfn_session_active(&g_client) || osGetTime() - last < interval) return;
     last = osGetTime();
     diagnostic_log("SESSION", "state=%d status=%d queue=%d nvst=%d rx=%u frames=%u ack=%u hb=%u webrtc=%d video=%u kbps=%u idr=%u pli=%u audio=%u decoded=%u drop=%u err=%u data=%u input=%u reports=%u mouse=%u clicks=%u keys=%u conceal=%u",
@@ -2355,6 +2703,11 @@ int main(int argc, char **argv)
     }
     /* Audio driver now, while nothing else is running (see audio_output.c). */
     audio_system_init();
+    menu_audio_set((MenuMusicMode)g_app.settings.music_mode, MENU_SCENE_MENUS);
+    menu_audio_start();
+    sfx_init();
+    sfx_set_enabled(g_app.settings.sound_effects);
+    if (g_app.settings.voice_cues) menu_audio_cue(MENU_CUE_OKAERI);
     play_history_load();
     game_prefs_load();
     queue_stats_load();
@@ -2390,6 +2743,12 @@ int main(int argc, char **argv)
             const u64 loop_now = osGetTime();
             const unsigned loop_ms = loop_now > loop_started ? (unsigned)(loop_now - loop_started) : 0;
             loop_started = loop_now;
+            /* The UI froze with no HOME, sleep or applet in between. */
+            static unsigned apt_seen;
+            if (loop_ms > 2500 && apt_seen == g_apt_events)
+                diagnostic_flag("ui-stall", "main loop blocked %u ms (view %d, job %d)", loop_ms, (int)g_app.view,
+                                (int)net_worker_current_job());
+            apt_seen = g_apt_events;
             if (g_app.view == VIEW_STREAM && loop_ms < 5000) {
                 if (loop_ms > g_loop_max_ms) g_loop_max_ms = loop_ms;
                 if (loop_ms > 25) {
@@ -2427,6 +2786,7 @@ int main(int argc, char **argv)
             auto_report_tick();
             stats_tick();
         }
+        keep_login_tick();
         if (g_app.whats_new_open && g_app.view != VIEW_STREAM) {
             handle_whats_new(down, repeat, action);
         } else if (g_app.guide_page >= 0 && g_app.view != VIEW_STREAM && !g_app.busy) {
@@ -2455,6 +2815,7 @@ int main(int argc, char **argv)
         if (hidKeysUp() & KEY_TOUCH) touchpad_end();
         if (queue_alert_active() && (down || touch_down)) queue_alert_stop();
         update_pointer_click(down, held);
+        ui_sounds(down, action);
 
         /* Game input: touch-held L3/R3/PS, and nothing while menus are up. */
         const bool streaming = g_app.view == VIEW_STREAM;
@@ -2480,11 +2841,15 @@ int main(int argc, char **argv)
 
         g_app.view = derive_view();
         g_app.keyboard_open = g_transport.keyboard_mode;
+        menu_audio_set((MenuMusicMode)g_app.settings.music_mode,
+                       g_app.view == VIEW_STREAM ? MENU_SCENE_GAME
+                       : g_app.view == VIEW_SESSION ? MENU_SCENE_WAITING : MENU_SCENE_MENUS);
         g_app.status = current_status();
         g_app.toast = g_notice[0] && osGetTime() < g_notice_until ? g_notice : NULL;
         track_session();
         setup_retry_tick();
         watch_session_errors();
+        watch_for_bugs();
         launch_track(&g_client);
         limit_wait_tick();
         {
@@ -2520,6 +2885,8 @@ int main(int argc, char **argv)
     /* The media core stops before the sound it feeds is closed. */
     webrtc_transport_close(&g_transport);
     audio_output_close();
+    menu_audio_exit();
+    sfx_exit();
     audio_system_exit();
     if (gfn_session_active(&g_client)) {
         close_media();

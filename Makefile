@@ -24,7 +24,7 @@ APP_AUTHOR := p0mpurin
 VERSION_MAJOR := 0
 VERSION_MINOR := 9
 VERSION_MICRO := 0
-VERSION_SUFFIX := -beta.27
+VERSION_SUFFIX := -beta.28
 VERSION := $(VERSION_MAJOR).$(VERSION_MINOR).$(VERSION_MICRO)$(VERSION_SUFFIX)
 APP_PRODUCT_CODE := CTR-P-KSMI
 APP_UNIQUE_ID := 0x4B534
@@ -65,7 +65,11 @@ export CACERT_OBJECT := $(CURDIR)/$(BUILD)/cacert_pem.o
 # _binary_NAME_t3x_start/_end. Opaque art uses RGB565 to match the top screen.
 GFX_NAMES := $(basename $(notdir $(wildcard gfx/*.png)))
 export GFX_OBJECTS := $(foreach name,$(GFX_NAMES),$(CURDIR)/$(BUILD)/$(name).t3x.o)
-export OFILES := $(OFILES_SOURCES) $(CACERT_OBJECT) $(GFX_OBJECTS)
+# Sound: audio/NAME.opus -> linked read-only data exposing
+# _binary_NAME_opus_start/_end (menu music and voice cues, see audio/CREDITS.txt).
+AUDIO_NAMES := $(basename $(notdir $(wildcard audio/*.opus)))
+export AUDIO_OBJECTS := $(foreach name,$(AUDIO_NAMES),$(CURDIR)/$(BUILD)/$(name).opus.o)
+export OFILES := $(OFILES_SOURCES) $(CACERT_OBJECT) $(GFX_OBJECTS) $(AUDIO_OBJECTS)
 export LD := $(CC)
 export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) $(foreach dir,$(LIBDIRS),-I$(dir)/include) -I$(CURDIR)/$(BUILD) -I$(CURDIR)/vendor/libpeer/src -I$(CURDIR)/vendor/mbedtls/include -I$(CURDIR)/vendor/libsrtp/include -I$(CURDIR)/build-transport/include -I$(CURDIR)/build-transport/mbedtls/include
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
@@ -73,7 +77,7 @@ export _3DSXDEPS := $(OUTPUT).smdh
 export _3DSXFLAGS := --smdh=$(CURDIR)/$(TARGET).smdh
 
 .PHONY: all clean cia run-info
-all: $(BUILD) $(CACERT_OBJECT) $(GFX_OBJECTS)
+all: $(BUILD) $(CACERT_OBJECT) $(GFX_OBJECTS) $(AUDIO_OBJECTS)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
 $(BUILD):
@@ -91,6 +95,10 @@ $(BUILD)/%.t3x: gfx/%.png | $(BUILD)
 
 $(CURDIR)/$(BUILD)/%.t3x.o: $(BUILD)/%.t3x
 	@cd $(BUILD) && $(OBJCOPY) -I binary -O elf32-littlearm -B arm 		--rename-section .data=.rodata.gfx,alloc,load,readonly,data,contents "$*.t3x" "$*.t3x.o"
+
+$(CURDIR)/$(BUILD)/%.opus.o: audio/%.opus | $(BUILD)
+	@cp "$<" "$(BUILD)/$*.opus"
+	@cd $(BUILD) && $(OBJCOPY) -I binary -O elf32-littlearm -B arm --rename-section .data=.rodata.audio,alloc,load,readonly,data,contents "$*.opus" "$*.opus.o"
 
 clean:
 	@rm -rf $(BUILD) $(TARGET).3dsx $(TARGET).elf $(TARGET).smdh $(TARGET).map $(TARGET).cia

@@ -6,6 +6,7 @@
 
 #include "audio_output.h"
 #include "diagnostic.h"
+#include "sfx.h"
 #include "ui.h"
 
 /* The stream plays on NDSP channel 0; the chime has its own channel. */
@@ -41,6 +42,9 @@ static void build_chime(void)
 
 static void play_chime(void)
 {
+    /* The rin-and-koto "your game is ready" (sfx.h), even with sound effects
+     * off; the synthesised bells if it could not load. */
+    if (sfx_play_always(SFX_QUEUE_READY)) return;
     build_chime();
     if (!g_chime) return;
     if (!audio_system_init()) return;

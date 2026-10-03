@@ -113,6 +113,7 @@ static bool run_job(NetJobKind kind, const char *text, const GfnGame *game)
         gfn_active_save(&g_work, game);
         return true;
     case NET_JOB_RECOVER: return gfn_recover_session(&g_work, game);
+    case NET_JOB_KEEP_LOGIN: return gfn_keep_login(&g_work);
     case NET_JOB_SIGN_OUT:
         gfn_sign_out(&g_work);
         return true;

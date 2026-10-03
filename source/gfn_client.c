@@ -1382,6 +1382,8 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
     json_t *root = json_loadb(response->body ? response->body : "", response->size, 0, &error);
     if (!root) {
         snprintf(client->status, sizeof(client->status), "%s: invalid JSON", operation);
+        diagnostic_flag("bad-json", "%s http=%ld bytes=%lu line=%d %.60s", operation, response->status,
+                        (unsigned long)response->size, error.line, error.text);
         client->session_state = GFN_SESSION_ERROR;
         return false;
     }
@@ -1426,8 +1428,8 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
                              "Settings > Account and sign in again (code %d).", local.name, status_code);
                 else
                     snprintf(client->status, sizeof(client->status),
-                             "NVIDIA says this account can't stream. Check it plays at play.geforcenow.com "
-                             "(no VPN), then try again (code %d).", status_code);
+                             "NVIDIA says this account can't play this game. Steam, Epic and Ubisoft games "
+                             "need that store linked at play.geforcenow.com (no VPN) (code %d).", status_code);
             }
         } else if (strstr(reason, "NO_CAPACITY") || strstr(reason, "CAPACITY")) {
             code = "capacity";
@@ -1450,6 +1452,9 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
         } else {
             snprintf(client->status, sizeof(client->status), "%s: CloudMatch HTTP %ld code %d %.60s",
                      operation, response->status, status_code, reason);
+            /* An answer with no wording of ours: the player saw raw codes. */
+            diagnostic_flag("unmapped-reason", "%s http=%ld code=%d desc=%.80s", operation, response->status,
+                            status_code, reason[0] ? reason : "-");
         }
         snprintf(client->fail_code, sizeof(client->fail_code), "%s", code);
         client->session_state = GFN_SESSION_ERROR;
@@ -1462,6 +1467,8 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
         json_t *description_value = json_is_object(request_status) ? json_object_get(request_status, "statusDescription") : NULL;
         if (json_is_string(description_value)) description = json_string_value(description_value);
         snprintf(client->status, sizeof(client->status), "%s: code %d %.90s", operation, status_code, description);
+        diagnostic_flag("no-session", "%s http=%ld code=%d %.80s", operation, response->status, status_code,
+                        description);
         client->session_state = GFN_SESSION_ERROR;
         json_decref(root);
         return false;
@@ -1469,6 +1476,7 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
     flexible_json_text(client->session_id, sizeof(client->session_id), json_object_get(session, "sessionId"));
     if (!client->session_id[0]) {
         snprintf(client->status, sizeof(client->status), "%s: CloudMatch response has no session ID", operation);
+        diagnostic_flag("no-session", "%s: no sessionId (http=%ld)", operation, response->status);
         client->session_state = GFN_SESSION_ERROR;
         json_decref(root);
         return false;
@@ -1494,6 +1502,10 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
      * step the queue started in (a new step means rig setup), and within it
      * never let the shown position rise. */
     bool queued = reported > 0;
+    /* Step 1 is the line itself. Beta.27 report SAFA4K: a brief "1" at step
+     * 5 locked the count there, and the real queue (87 down to 15) never
+     * showed. Lock again onto step 1 when it comes. */
+    if (queued && client->seat_setup_step == 1 && client->queue_step != 1) client->queue_best = 0;
     if (queued && client->queue_best <= 0) {
         client->queue_step = client->seat_setup_step;
         client->queue_best = reported;
@@ -1503,6 +1515,7 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
         client->queue_best = reported;
     }
     client->queue_position = queued ? client->queue_best : 0;
+    client->queue_reported = reported;
     diagnostic_log("CLOUDMATCH", "queue shown=%d reported=%d session=%d seat=%d root=%d step=%d queueStep=%d best=%d status=%d",
                    client->queue_position, reported, client->queue_session_position,
                    client->queue_seat_position, client->queue_root_position,
@@ -1556,14 +1569,29 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
          * only what we know. */
         char reason[24];
         flexible_json_text(reason, sizeof(reason), json_object_get(session, "errorCode"));
+        snprintf(client->end_error_code, sizeof(client->end_error_code), "%s", reason);
         json_t *end_desc = json_is_object(request_status) ? json_object_get(request_status, "statusDescription") : NULL;
         json_t *end_unified = json_is_object(request_status) ? json_object_get(request_status, "unifiedErrorCode") : NULL;
-        snprintf(client->status, sizeof(client->status),
+        /* errorCode 1 is a clean end, mostly the game closing (its own
+         * Exit or Save and quit): NVIDIA ends the rig with it, as on PC. */
+        snprintf(client->status, sizeof(client->status), !strcmp(reason, "1") ?
+                 "The game closed, so NVIDIA ended the cloud session. You're still signed in: press A to play again, or B to go back." :
                  "The game session has ended. Press A to start it again, or B to go back.");
         diagnostic_log("CLOUDMATCH", "%s: session over (status %d) errorCode=%s desc=%.60s unified=%lld",
                        operation, client->session_status, reason[0] ? reason : "-",
                        json_is_string(end_desc) ? json_string_value(end_desc) : "-",
                        json_is_integer(end_unified) ? (long long)json_integer_value(end_unified) : -1);
+        /* Which fields NVIDIA sends with an end, to find why a session ended
+         * (values left out: some hold addresses). */
+        char keys[200] = "";
+        const char *key;
+        json_t *value;
+        json_object_foreach(session, key, value) {
+            const size_t used = strlen(keys);
+            if (used + strlen(key) + 2 >= sizeof(keys)) break;
+            snprintf(keys + used, sizeof(keys) - used, "%s%s", used ? "," : "", key);
+        }
+        diagnostic_log("CLOUDMATCH", "end fields: %s", keys);
         json_decref(root);
         return false;
     } else if (client->queue_position > 0 ||
@@ -1970,6 +1998,8 @@ static void reset_launch_state(GfnClient *client)
     client->limit_unclosable = false;
     client->limit_rate = false;
     client->fail_code[0] = '\0';
+    client->end_error_code[0] = '\0';
+    client->queue_reported = 0;
     client->ads_required = false;
     client->ads_answered = client->ads_pending_count = 0;
     client->session_paused = false;
@@ -2394,12 +2424,29 @@ void gfn_session_tick(GfnClient *client)
         answer_queue_ads(client, headers, count);
 }
 
+/* Renew the login before it runs out, without touching the status line a
+ * session screen may be showing. A long game outlasted the login, and the
+ * renewal at its end could be refused, which signed the player out. */
+bool gfn_keep_login(GfnClient *client)
+{
+    if (!gfn_has_session(client)) return false;
+    char status[sizeof(client->status)];
+    memcpy(status, client->status, sizeof(status));
+    const bool ok = refresh_session(client);
+    if (client->auth_state == GFN_AUTH_LOGGED_IN) memcpy(client->status, status, sizeof(status));
+    diagnostic_log("AUTH", "background renewal %s; login lasts %llds more", ok ? "done" : "failed",
+                   (long long)(client->token_expires_at - (int64_t)time(NULL)));
+    return ok;
+}
+
 bool gfn_stop_session(GfnClient *client)
 {
     if (!client->session_id[0]) {
         client->session_state = GFN_SESSION_IDLE;
         return true;
     }
+    /* After a long game the login may have run out; the stop needs it. */
+    if (gfn_has_session(client)) refresh_session(client);
     char url[512];
     snprintf(url, sizeof(url), "%s/v2/session/%s", session_control(client), client->session_id);
     const char *headers[16]; char client_header[80], device_header[80];

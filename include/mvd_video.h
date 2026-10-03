@@ -47,4 +47,6 @@ unsigned mvd_video_frames_lost(void);
  * running maximum. For the session performance summary. */
 void mvd_video_decode_totals(unsigned long long *sum_us, unsigned *count, unsigned *max_us, bool reset_max);
 unsigned mvd_video_errors(void);
+/* The last brightness check found an almost black picture. */
+bool mvd_video_picture_dark(void);
 const char *mvd_video_status(void);

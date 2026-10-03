@@ -22,9 +22,14 @@ void settings_defaults(AppSettings *settings)
     settings->sharpen = false;
     settings->gyro_mode = GFN_GYRO_OFF;
     settings->gyro_speed = 1;
+    settings->camera_speed = 1;
+    settings->camera_invert = 0;
     settings->theme = 0;
     settings->volume = 5;
     settings->mute_in_menus = false;
+    settings->music_mode = 0; /* MENU_MUSIC_ON */
+    settings->voice_cues = true;
+    settings->sound_effects = true;
     settings->lid_mode = LID_PAUSE;
     settings->guide_done = false;
     settings->auto_update = true;
@@ -86,9 +91,14 @@ bool settings_load(AppSettings *settings)
     settings->gyro_mode = (GfnGyroMode)read_int(root, "gyro_mode", settings->gyro_mode,
                                                 GFN_GYRO_MODE_COUNT);
     settings->gyro_speed = (unsigned)read_int(root, "gyro_speed", (int)settings->gyro_speed, 3);
+    settings->camera_speed = (unsigned)read_int(root, "camera_speed", (int)settings->camera_speed, 4);
+    settings->camera_invert = (unsigned)read_int(root, "camera_invert", (int)settings->camera_invert, 3);
     settings->theme = (unsigned)read_int(root, "theme", (int)settings->theme, UI_THEME_COUNT);
     settings->volume = (unsigned)read_int(root, "volume", (int)settings->volume, 6);
     settings->mute_in_menus = read_bool(root, "mute_in_menus", settings->mute_in_menus);
+    settings->music_mode = (unsigned)read_int(root, "music_mode", (int)settings->music_mode, 3);
+    settings->voice_cues = read_bool(root, "voice_cues", settings->voice_cues);
+    settings->sound_effects = read_bool(root, "sound_effects", settings->sound_effects);
     /* Older settings files only had lid_keeps_playing (true: keep playing). */
     const int lid_fallback = read_bool(root, "lid_keeps_playing", false) ? LID_KEEP_PLAYING : LID_PAUSE;
     settings->lid_mode = (unsigned)read_int(root, "lid_mode", lid_fallback, LID_MODE_COUNT);
@@ -114,7 +124,7 @@ bool settings_save(const AppSettings *settings)
 {
     mkdir("sdmc:/3ds", 0777);
     mkdir(APP_DATA_DIR, 0777);
-    json_t *root = json_pack("{s:i,s:i,s:b,s:b,s:b,s:b,s:b,s:i,s:b,s:i,s:i,s:i,s:i,s:b,s:i,s:b,s:b,s:b,s:b,s:s,s:i,s:s,s:b,s:i,s:s}",
+    json_t *root = json_pack("{s:i,s:i,s:b,s:b,s:b,s:b,s:b,s:i,s:b,s:i,s:i,s:i,s:i,s:b,s:i,s:b,s:b,s:b,s:b,s:s,s:i,s:s,s:b,s:i,s:s,s:i,s:b,s:b}",
                              "button_layout", (int)settings->button_layout,
                              "deadzone", (int)settings->deadzone,
                              "swap_shoulders", settings->swap_shoulders,
@@ -139,8 +149,13 @@ bool settings_save(const AppSettings *settings)
                              "install_id", settings->install_id,
                              "share_stats", settings->share_stats,
                              "share_consent", (int)settings->share_consent,
-                             "provider", settings->provider);
+                             "provider", settings->provider,
+                             "music_mode", (int)settings->music_mode,
+                             "voice_cues", settings->voice_cues,
+                             "sound_effects", settings->sound_effects);
     if (!root) return false;
+    json_object_set_new(root, "camera_speed", json_integer((json_int_t)settings->camera_speed));
+    json_object_set_new(root, "camera_invert", json_integer((json_int_t)settings->camera_invert));
     const bool ok = json_dump_file(root, SETTINGS_PATH, JSON_INDENT(2)) == 0;
     json_decref(root);
     return ok;
@@ -164,6 +179,8 @@ void settings_apply_input(const AppSettings *settings)
         .swap_shoulders = settings->swap_shoulders,
         .gyro_mode = settings->gyro_mode,
         .gyro_speed = settings->gyro_speed,
+        .camera_speed = settings->camera_speed,
+        .camera_invert = settings->camera_invert,
     };
     gfn_input_configure(&config);
 }

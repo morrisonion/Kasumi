@@ -107,6 +107,41 @@ function newCode() {
   return [...bytes].map((b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join("");
 }
 
+// Kasumi 0.9.0-beta.28+ marks problems in its log. These helpers pull them
+// out so a report can be read from its first lines.
+const FLAG_LINE = /\[FLAG\] ([a-z0-9-]+) #\d+: (.*)/;
+
+// "video-freeze x2, unmapped-reason x1" from the client, else counted from
+// the [FLAG] lines of the logs (older clients send no summary).
+function flagSummary(report) {
+  if (typeof report.flags === "string" && report.flags) return report.flags;
+  const counts = new Map();
+  for (const log of [report.log_older, report.log]) {
+    for (const line of String(log || "").split("\n")) {
+      const m = line.match(FLAG_LINE);
+      if (m) counts.set(m[1], (counts.get(m[1]) || 0) + 1);
+    }
+  }
+  return [...counts].map(([code, n]) => `${code} x${n}`).join(", ");
+}
+
+// The lines worth reading first: flags, session ends and what the player
+// was told, with where each came from.
+function summaryLines(report) {
+  const out = [];
+  const pick = (label, log) => {
+    for (const line of String(log || "").split("\n")) {
+      if (line.includes(" [FLAG] ") || line.includes(" [END] ") ||
+          line.includes(" [UI] modal ") || line.includes(" [REPORT] automatic"))
+        out.push(`${label} ${line}`);
+    }
+  };
+  // Oldest first; when there are too many, the newest are kept.
+  pick("run before:", report.previous_log);
+  pick("this run:", (report.log_older || "") + "\n" + (report.log || ""));
+  return out.slice(-80);
+}
+
 async function submit(request, env) {
   const length = Number(request.headers.get("content-length") || 0);
   if (length > MAX_UPLOAD_BYTES) return json({ error: "too large" }, 413);
@@ -145,15 +180,16 @@ async function submit(request, env) {
     at: new Date().toISOString(),
     size: gz.length,
     dump: !!(report.dump && report.dump.data),
-    trigger: String(report.trigger || "manual").slice(0, 24),
+    trigger: String(report.trigger || "manual").slice(0, 72),
     install: String(report.install || "").slice(0, 20),
+    flags: flagSummary(report).slice(0, 300),
   };
   await env.REPORTS.put("r:" + code, gz, { expirationTtl: KEEP_SECONDS, metadata: meta });
   await env.REPORTS.put(limitKey, String(sent + 1), { expirationTtl: 3700 });
 
   if (env.DISCORD_WEBHOOK) {
     const note = `New Kasumi report **${code}** (${meta.trigger}): ${meta.version} (build ${meta.build})` +
-      (meta.dump ? ", with a crash dump" : "");
+      (meta.dump ? ", with a crash dump" : "") + (meta.flags ? `\nFlags: ${meta.flags}` : "");
     await fetch(env.DISCORD_WEBHOOK, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -193,6 +229,10 @@ async function view(url, env, code, wantDump) {
     report.dump && report.dump.data
       ? `Crash dump: ${report.dump.name} -> ${url.origin}/report/${code}/dump?key=...`
       : "Crash dump: none",
+    `Flags: ${flagSummary(report) || "none"}`,
+    "",
+    "===== summary (flags, session ends, error screens) =====",
+    ...(summaryLines(report).length ? summaryLines(report) : ["(nothing flagged)"]),
     "",
     "===== settings.json =====",
     report.settings || "(none)",
@@ -217,11 +257,11 @@ async function list(url, env) {
   const html = [
     "<!doctype html><meta charset=utf-8><title>Kasumi reports</title>",
     "<style>body{font:14px system-ui;margin:24px;background:#111;color:#ddd}a{color:#7EBEA5}td,th{padding:4px 12px;text-align:left}</style>",
-    `<h1>Kasumi reports (${rows.length})</h1><p><a href="/stats?key=${key}">Performance stats &rarr;</a></p><table><tr><th>Code</th><th>Sent</th><th>Why</th><th>Version</th><th>Build</th><th>Console</th><th>Dump</th></tr>`,
+    `<h1>Kasumi reports (${rows.length})</h1><p><a href="/stats?key=${key}">Performance stats &rarr;</a></p><table><tr><th>Code</th><th>Sent</th><th>Why</th><th>Version</th><th>Build</th><th>Console</th><th>Dump</th><th>Flags</th></tr>`,
     ...rows.map((r) =>
       `<tr><td><a href="/report/${r.code}?key=${key}">${r.code}</a></td><td>${r.at || ""}</td>` +
       `<td>${esc(r.trigger || "manual")}</td><td>${esc(r.version || "")}</td><td>${esc(r.build || "")}</td>` +
-      `<td>${esc(r.install || "")}</td><td>${r.dump ? "yes" : ""}</td></tr>`),
+      `<td>${esc(r.install || "")}</td><td>${r.dump ? "yes" : ""}</td><td>${esc(r.flags || "")}</td></tr>`),
     "</table>",
   ];
   return text(html.join(""), 200, "text/html; charset=utf-8");

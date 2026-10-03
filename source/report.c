@@ -312,6 +312,10 @@ bool report_send(const char *trigger)
     json_t *root = json_pack("{s:s,s:s,s:s,s:s,s:s}", "app", APP_NAME, "version", APP_VERSION,
                              "build", APP_BUILD, "sent_at", sent_at, "trigger", trigger);
     if (!root) return fail("Out of memory");
+    /* This run's flags (see diagnostic_flag): the service lists them first. */
+    char flags[512];
+    diagnostic_flags_summary(flags, sizeof(flags));
+    json_object_set_new(root, "flags", json_string(flags));
     json_object_set_new(root, "log", scrubbed_file(DIAGNOSTIC_PATH));
     json_object_set_new(root, "log_older", scrubbed_file(DIAGNOSTIC_OLDER_PATH));
     json_object_set_new(root, "previous_log", scrubbed_file(DIAGNOSTIC_PREVIOUS_PATH));

@@ -409,6 +409,13 @@ informed by [Moonlight-N3DS](https://github.com/zoeyjodon/moonlight-N3DS), and i
 [moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c)
 3DS socket code showed how to get the largest receive buffer the 3DS allows.
 
+Kasumi's voice is VOICEVOX:春日部つむぎ ([VOICEVOX](https://voicevox.hiroshiba.jp)).
+The Home Menu jingle and sound effects are original, made with
+[`tools/audio`](tools/audio). Menu music from [Pixabay](https://pixabay.com/music/)
+under the Pixabay Content License: "Bossa Nova Cafe Morning Breeze" by Alex Morgan
+(573876), "Bossa Nova Morning Music" by Andriih (599227) and "Bossa Nova or Lofi"
+by TheBoysBeats (296432).
+
 GeForce NOW and NVIDIA are trademarks of NVIDIA Corporation. Nintendo 3DS is
 a trademark of Nintendo. Kasumi is an unofficial fan project and is not
 affiliated with or endorsed by either company.

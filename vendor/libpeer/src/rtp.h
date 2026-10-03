@@ -83,8 +83,11 @@ typedef void (*RtpOnVideoPacket)(const PeerVideoPacket* packet, void* user_data)
 
 // Dynamic 720p frames regularly span more than eight RTP packets. A tiny
 // window turns normal UDP burst reordering into artificial packet loss.
-#define RTP_REORDER_WINDOW 128
-#define RTP_REORDER_MAX_HOLD_PACKETS 64
+/* Kasumi: room for a resend on a slow link. Beta.27 report SAFA4K: small
+ * (~350 byte) packets at 300-800 ms round trips filled 64 slots in ~200 ms,
+ * so a resend was given up on long before it could arrive (~400 KB). */
+#define RTP_REORDER_WINDOW 256
+#define RTP_REORDER_MAX_HOLD_PACKETS 192
 /* Kasumi: 150 ms, matching OpenNOW's NACK tracking window. At a 67 ms RTT a
  * retransmission often landed just after 100 ms (build 60: all 200
  * retransmits arrived, yet 18 frames were abandoned, each costing a freeze

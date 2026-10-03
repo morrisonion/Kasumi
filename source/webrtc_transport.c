@@ -348,11 +348,20 @@ static void on_video(const PeerVideoPacket *packet, void *userdata)
         t->video_kbps = (unsigned)((bytes * 8u) / elapsed);
         t->video_rate_started_at = rate_now;
         t->video_rate_bytes = t->video_bytes;
-        diagnostic_log("VIDEO", "rate=%u kbps totalBytes=%llu AU=%u srcSkipped=%u late50=%u maxGap=%u",
-                       t->video_kbps, (unsigned long long)t->video_bytes,
-                       t->video_access_units, t->video_src_skipped, t->video_late_arrivals,
-                       t->video_max_gap_ms);
-        t->video_src_skipped = t->video_late_arrivals = t->video_max_gap_ms = 0;
+        /* Every 5 s, or at once when frames went missing or arrived late:
+         * build 97 logged every second, one line in seven of a session. */
+        t->video_log_kbps_sum += t->video_kbps;
+        if (!t->video_log_seconds || t->video_kbps < t->video_log_kbps_min) t->video_log_kbps_min = t->video_kbps;
+        ++t->video_log_seconds;
+        if (t->video_log_seconds >= 5 || t->video_src_skipped || t->video_max_gap_ms >= 150) {
+            diagnostic_log("VIDEO", "rate=%u kbps min=%u over=%us totalBytes=%llu AU=%u srcSkipped=%u late50=%u maxGap=%u",
+                           t->video_log_kbps_sum / t->video_log_seconds, t->video_log_kbps_min,
+                           t->video_log_seconds, (unsigned long long)t->video_bytes,
+                           t->video_access_units, t->video_src_skipped, t->video_late_arrivals,
+                           t->video_max_gap_ms);
+            t->video_src_skipped = t->video_late_arrivals = t->video_max_gap_ms = 0;
+            t->video_log_seconds = t->video_log_kbps_sum = t->video_log_kbps_min = 0;
+        }
     }
     t->last_video_size = packet->size;
     if ((has_sps || has_pps || has_idr) &&
@@ -363,7 +372,7 @@ static void on_video(const PeerVideoPacket *packet, void *userdata)
                        has_sps ? 1 : 0, has_pps ? 1 : 0, has_idr ? 1 : 0);
         t->last_video_key_log_at = rate_now;
     }
-    if (t->video_access_units <= 5 || t->video_access_units % 120 == 0) {
+    if (t->video_access_units <= 5) {
         const unsigned char *p = packet->data;
         diagnostic_log("VIDEO", "access_unit=%u bytes=%lu sps=%u pps=%u idr=%u head=%02x %02x %02x %02x %02x",
                        t->video_access_units, (unsigned long)packet->size,
@@ -430,7 +439,8 @@ static void on_audio(const PeerAudioPacket *packet, void *userdata)
     if (result > 0) t->audio_decoded++;
     else if (result == 0) t->audio_dropped++;
     else t->audio_errors++;
-    if (t->audio_packets <= 3 || t->audio_packets % 500 == 0)
+    /* The SESSION line carries the running counts. */
+    if (t->audio_packets <= 3)
         diagnostic_log("AUDIO", "packet=%u decoded=%u dropped=%u errors=%u pt=%u bytes=%lu samples=%d seq=%u status=%s",
                        t->audio_packets, t->audio_decoded, t->audio_dropped,
                        t->audio_errors, packet->payload_type,
@@ -484,7 +494,10 @@ static void on_state(PeerConnectionState state, void *userdata)
     } else if (state == PEER_CONNECTION_CONNECTED) {
         t->state = WEBRTC_CHECKING;
         snprintf(t->status, sizeof(t->status), "ICE connected; DTLS handshake");
-    } else if (state == PEER_CONNECTION_FAILED || state == PEER_CONNECTION_DISCONNECTED) {
+    } else if (state == PEER_CONNECTION_FAILED || state == PEER_CONNECTION_DISCONNECTED ||
+               (state == PEER_CONNECTION_CLOSED && t->state == WEBRTC_CONNECTED)) {
+        /* A DTLS close_notify from the rig closes a working stream. Beta.27
+         * report SAFA4K counted it as "connecting" and never reconnected. */
         t->state = WEBRTC_FAILED;
         snprintf(t->status, sizeof(t->status), "WebRTC transport %s", peer_connection_state_to_string(state));
     } else {
@@ -698,8 +711,11 @@ bool webrtc_transport_start(WebRtcTransport *t, NvstSignal *signal,
     PeerConnection *pc = peer_connection_create(&config);
     if (!pc) { snprintf(t->status, sizeof(t->status), "WebRTC peer allocation failed"); t->state = WEBRTC_FAILED; return false; }
     t->peer = pc;
-    /* Weak / hotspot links may wait longer for a lost packet's resend. */
-    peer_connection_set_max_video_hold_ms(pc, stream_profile_weak() ? 450 : 300);
+    /* How long a lost packet's resend may take (1.5 round trips). Beta.27
+     * report SAFA4K: at 300-800 ms round trips the 300/450 ms cap gave up
+     * before resends arrived, so each loss froze the picture until a
+     * keyframe. */
+    peer_connection_set_max_video_hold_ms(pc, stream_profile_weak() ? 900 : 700);
     peer_connection_onicecandidate(pc, on_local_candidates);
     peer_connection_oniceconnectionstatechange(pc, on_state);
     peer_connection_ondatachannel(pc, on_data, on_data_open, on_data_close);
@@ -959,10 +975,13 @@ static void transport_tick(WebRtcTransport *t, NvstSignal *signal)
     }
     if (peer_connection_datachannel_send_binary_sid(pc, (char *)packet, size, sid) >= 0)
         t->input_reports++;
+    /* Buttons and triggers as they change; stick positions only every 10 s.
+     * Build 97 logged sticks every 200 ms: most of a session's log was
+     * stick noise, and a long game rolled its start out of the report. */
     if (changed && (!t->input_state_logged || state.buttons != t->last_input_buttons ||
                     state.left_trigger != t->last_input_left_trigger ||
                     state.right_trigger != t->last_input_right_trigger ||
-                    now_input - t->last_input_state_log_at >= 200)) {
+                    now_input - t->last_input_state_log_at >= 10000)) {
         diagnostic_log("INPUT", "tx report=%u protocol=%d sid=%u bytes=%lu buttons=%04x triggers=%u/%u sticks=%d/%d/%d/%d tsUs=%llu",
                        t->input_reports, t->input_protocol_version, sid, (unsigned long)size,
                        state.buttons, state.left_trigger, state.right_trigger,

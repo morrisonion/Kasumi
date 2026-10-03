@@ -8,6 +8,7 @@
 
 #include "game_art.h"
 #include "game_prefs.h"
+#include "menu_audio.h"
 #include "updater.h"
 #include "mvd_video.h"
 #include "play_history.h"
@@ -71,9 +72,9 @@ static const UiRect DET_STORE_NEXT = { 260, 106, 44, 44 };
 static const UiRect DET_FAV = { 16, 188, 92, 44 };
 static const UiRect DET_OPTIONS = { 114, 188, 92, 44 };
 static const UiRect DET_BACK = { 212, 188, 92, 44 };
-static const UiRect OPT_CLOSE = { 84, 206, 152, 30 };
-#define OPT_ROW_Y 38.0f
-#define OPT_ROW_H 30.0f
+static const UiRect OPT_CLOSE = { 246, 3, 64, 30 };
+#define OPT_ROW_Y 39.0f
+#define OPT_ROW_H 22.0f
 
 /* Button mapping editor, lower screen. */
 static const UiRect MAP_PREV = { 16, 96, 48, 48 };
@@ -183,6 +184,8 @@ static const SettingEntry SETTING_ENTRIES[] = {
     { SETTING_LAYOUT, NULL, NULL },
     { SETTING_TRIGGERS, NULL, NULL },
     { SETTING_DEADZONE, NULL, NULL },
+    { SETTING_CAMERA_SPEED, NULL, NULL },
+    { SETTING_CAMERA_INVERT, NULL, NULL },
     { SETTING_GYRO, NULL, NULL },
     { SETTING_GYRO_SPEED, NULL, NULL },
     { SETTING_FAST_INPUT, NULL, NULL },
@@ -194,6 +197,9 @@ static const SettingEntry SETTING_ENTRIES[] = {
     { -1, "音声", "AUDIO" },
     { SETTING_VOLUME, NULL, NULL },
     { SETTING_MENU_AUDIO, NULL, NULL },
+    { SETTING_MUSIC, NULL, NULL },
+    { SETTING_VOICE, NULL, NULL },
+    { SETTING_SFX, NULL, NULL },
     { -1, "外観", "APPEARANCE" },
     { SETTING_THEME, NULL, NULL },
     { -1, "接続", "NETWORK" },
@@ -230,17 +236,19 @@ int screens_setting_at(int position)
 
 static const char *const SETTING_LABELS[SETTING_COUNT] = {
     [SETTING_LAYOUT] = "Button layout", [SETTING_TRIGGERS] = "Triggers",
-    [SETTING_DEADZONE] = "Stick deadzone", [SETTING_POINTER] = "Pointer start",
+    [SETTING_DEADZONE] = "Stick deadzone", [SETTING_POINTER] = "Mouse mode at start",
     [SETTING_STATS] = "Stream stats", [SETTING_FAST_INPUT] = "Fast input",
     [SETTING_RESOLUTION] = "Screen mode", [SETTING_BITRATE] = "Bitrate",
     [SETTING_FILTER] = "Encoder filter", [SETTING_GYRO] = "Gyro aim",
     [SETTING_GYRO_SPEED] = "Gyro speed", [SETTING_ACCOUNT] = "NVIDIA account",
+    [SETTING_CAMERA_SPEED] = "Camera stick speed", [SETTING_CAMERA_INVERT] = "Invert camera",
     [SETTING_THEME] = "Theme", [SETTING_VOLUME] = "Stream volume",
     [SETTING_MENU_AUDIO] = "Audio in menus", [SETTING_LID] = "Closing the lid",
     [SETTING_CONNECTION] = "Connection check", [SETTING_GUIDE] = "Getting started",
     [SETTING_NETWORK] = "Connection type", [SETTING_SERVER] = "Server",
     [SETTING_REPORT] = "Send diagnostic report", [SETTING_SHARE] = "Share problem reports",
     [SETTING_SHARE_STATS] = "Share performance stats", [SETTING_COMMUNITY] = "Kasumi Discord",
+    [SETTING_MUSIC] = "Menu music", [SETTING_VOICE] = "Voice", [SETTING_SFX] = "Sound effects",
     [SETTING_UPDATES] = "Software update", [SETTING_AUTO_UPDATE] = "Check automatically",
     [SETTING_UPDATE_CHANNEL] = "Update channel", [SETTING_PROVIDER] = "GeForce NOW provider",
 };
@@ -251,12 +259,13 @@ static const char *const SETTING_JP[SETTING_COUNT] = {
     [SETTING_RESOLUTION] = "表示", [SETTING_BITRATE] = "ビットレート",
     [SETTING_FILTER] = "補正", [SETTING_GYRO] = "ジャイロ",
     [SETTING_GYRO_SPEED] = "感度", [SETTING_ACCOUNT] = "アカウント",
+    [SETTING_CAMERA_SPEED] = "カメラ速度", [SETTING_CAMERA_INVERT] = "カメラ反転",
     [SETTING_THEME] = "色", [SETTING_VOLUME] = "音量",
     [SETTING_MENU_AUDIO] = "メニュー音", [SETTING_LID] = "スリープ",
     [SETTING_CONNECTION] = "接続", [SETTING_GUIDE] = "案内",
     [SETTING_NETWORK] = "回線", [SETTING_SERVER] = "サーバー",
     [SETTING_REPORT] = "報告", [SETTING_SHARE] = "協力", [SETTING_SHARE_STATS] = "統計",
-    [SETTING_COMMUNITY] = "仲間",
+    [SETTING_COMMUNITY] = "仲間", [SETTING_MUSIC] = "音楽", [SETTING_VOICE] = "声", [SETTING_SFX] = "効果音",
     [SETTING_UPDATES] = "更新", [SETTING_AUTO_UPDATE] = "自動確認",
     [SETTING_UPDATE_CHANNEL] = "チャンネル", [SETTING_PROVIDER] = "提供元",
 };
@@ -339,6 +348,8 @@ static unsigned setting_option(const App *app, int setting, unsigned *count)
     case SETTING_FILTER: *count = 2; return s->sharpen ? 1 : 0;
     case SETTING_GYRO: *count = GFN_GYRO_MODE_COUNT; return (unsigned)s->gyro_mode;
     case SETTING_GYRO_SPEED: *count = 3; return s->gyro_speed;
+    case SETTING_CAMERA_SPEED: *count = 4; return s->camera_speed;
+    case SETTING_CAMERA_INVERT: *count = 3; return s->camera_invert;
     case SETTING_THEME: *count = UI_THEME_COUNT; return s->theme;
     case SETTING_VOLUME: *count = 6; return s->volume;
     case SETTING_MENU_AUDIO: *count = 2; return s->mute_in_menus ? 1 : 0;
@@ -350,6 +361,9 @@ static unsigned setting_option(const App *app, int setting, unsigned *count)
     case SETTING_PROVIDER: *count = 1 + providers_count(); return provider_index(s);
     case SETTING_AUTO_UPDATE: *count = 2; return s->auto_update ? 0 : 1;
     case SETTING_UPDATE_CHANNEL: *count = 2; return s->update_beta ? 1 : 0;
+    case SETTING_MUSIC: *count = MENU_MUSIC_MODE_COUNT; return s->music_mode;
+    case SETTING_VOICE: *count = 2; return s->voice_cues ? 0 : 1;
+    case SETTING_SFX: *count = 2; return s->sound_effects ? 0 : 1;
     default: *count = 0; return 0;
     }
 }
@@ -375,6 +389,9 @@ static const char *setting_value(const App *app, int setting)
     case SETTING_FILTER: return s->sharpen ? "Sharpen" : "Clean";
     case SETTING_GYRO: return gyro_mode_name(s->gyro_mode);
     case SETTING_GYRO_SPEED: return s->gyro_speed == 0 ? "Low" : s->gyro_speed == 2 ? "High" : "Medium";
+    case SETTING_CAMERA_SPEED:
+        return s->camera_speed == 0 ? "Slow" : s->camera_speed == 2 ? "Fast" : s->camera_speed == 3 ? "Fastest" : "Normal";
+    case SETTING_CAMERA_INVERT: return s->camera_invert == 1 ? "Up-down" : s->camera_invert == 2 ? "Both" : "Off";
     case SETTING_THEME: return ui_theme_name((UiTheme)s->theme);
     case SETTING_VOLUME: {
         static const char *const levels[6] = { "Muted", "20 %", "40 %", "60 %", "80 %", "100 %" };
@@ -412,6 +429,10 @@ static const char *setting_value(const App *app, int setting)
     }
     case SETTING_GUIDE: return "Open";
     case SETTING_COMMUNITY: return "Scan";
+    case SETTING_MUSIC:
+        return s->music_mode == MENU_MUSIC_QUIET ? "Quiet" : s->music_mode == MENU_MUSIC_OFF ? "Off" : "On";
+    case SETTING_VOICE: return s->voice_cues ? "On" : "Off";
+    case SETTING_SFX: return s->sound_effects ? "On" : "Off";
     case SETTING_REPORT: return report_available() ? "Send" : "Unavailable";
     case SETTING_SHARE: return s->share_reports == SHARE_YES ? "On" : "Off";
     case SETTING_SHARE_STATS: return s->share_stats ? "On" : "Off";
@@ -458,7 +479,7 @@ static const char *setting_description(const App *app, int setting)
     case SETTING_DEADZONE:
         return "How far a stick moves before the game notices. Raise it if a character drifts on its own.";
     case SETTING_POINTER:
-        return "Start Genshin Impact in pointer mode so you can click through its PC login screen.";
+        return "Start Genshin Impact in mouse and keyboard mode so you can click through its PC login screen. Tap MOUSE in game to go back to controller mode.";
     case SETTING_STATS:
         return "Show frame rate, bitrate, ping and resent packets on the lower screen while playing.";
     case SETTING_FAST_INPUT:
@@ -481,12 +502,21 @@ static const char *setting_description(const App *app, int setting)
             : "No server sharpening: the bitrate goes to the picture itself, so less blocking and pulsing. Next launch.";
     case SETTING_GYRO:
         return s->gyro_mode == GFN_GYRO_OFF
-            ? "Tilt and turn the console to aim, like a Switch or Steam Deck. Adds to the C-Stick; moves the pointer in pointer mode."
+            ? "Tilt and turn the console to aim, like a Switch or Steam Deck. Adds to the C-Stick; moves the mouse in mouse mode."
             : s->gyro_mode == GFN_GYRO_ALWAYS
             ? "Turning the console always moves the camera. Great for shooters; hold the console still when you don't aim."
             : "Gyro only works while the aim trigger (ZL, or L when triggers are swapped) is held.";
     case SETTING_GYRO_SPEED:
         return "How fast turning the console moves the camera. Start at Medium and lower it if aiming overshoots.";
+    case SETTING_CAMERA_SPEED:
+        return s->camera_speed == 0 ? "The C-Stick turns the camera at most 70 % as fast. For precise aiming."
+             : s->camera_speed == 1 ? "The C-Stick as it is: a full push turns the camera at full speed."
+             : s->camera_speed == 2 ? "A lighter push on the C-Stick turns the camera at full speed."
+                                    : "Full camera speed with a light push. For games that turn slowly.";
+    case SETTING_CAMERA_INVERT:
+        return s->camera_invert == 0 ? "The C-Stick moves the camera the usual way."
+             : s->camera_invert == 1 ? "Pushing the C-Stick up looks down, like a flight stick. Gyro aim is not inverted."
+                                     : "Both directions of the C-Stick are reversed. Gyro aim is not inverted.";
     case SETTING_THEME:
         return "The accent colour: Seiji celadon, Sakura cherry, Kin gold, Ai indigo or Fuji wisteria.";
     case SETTING_VOLUME:
@@ -517,6 +547,23 @@ static const char *setting_description(const App *app, int setting)
         return s->share_stats
             ? "After each launch and session, Kasumi sends a few numbers: did the game start, queue time, ping, smoothness, lost frames. No log text, no addresses, no account."
             : "Turn on to send a few numbers after each launch and session (did the game start, ping, smoothness). It shows what to improve for real players.";
+    case SETTING_MUSIC: {
+        static char text[240];
+        const char *song = menu_audio_now_playing();
+        if (s->music_mode != MENU_MUSIC_OFF && song[0])
+            snprintf(text, sizeof(text), "Now playing: %.80s. X: next song. Your own MP3 or Opus songs in "
+                     "3ds/kasumi/music play instead.", song);
+        else
+            snprintf(text, sizeof(text), "Soft music in the menus that fades out when a game starts. Your own MP3 "
+                     "or Opus songs in 3ds/kasumi/music play instead of the built-in ones.");
+        return text;
+    }
+    case SETTING_VOICE:
+        return s->voice_cues ? "Tsumugi welcomes you back when Kasumi opens and sees you off when a game starts."
+                             : "No voice lines. Turn on for Tsumugi's welcome and send-off.";
+    case SETTING_SFX:
+        return s->sound_effects ? "Soft koto, wood and water sounds in the menus. In a game, only the stream menu and screenshots make a sound."
+                                : "Silent menus. The \"your game is ready\" chime still plays when a queue ends.";
     case SETTING_COMMUNITY:
         return "Chat with other players, get help and hear about new versions first. Scan with your phone, or visit discord.gg/K9Jy3t7YHE";
     case SETTING_REPORT:
@@ -584,9 +631,16 @@ void screens_setting_change(App *app, int setting, int direction)
         s->gyro_mode = (GfnGyroMode)((s->gyro_mode + GFN_GYRO_MODE_COUNT + step) % GFN_GYRO_MODE_COUNT);
         break;
     case SETTING_GYRO_SPEED: s->gyro_speed = (s->gyro_speed + 3 + step) % 3; break;
+    case SETTING_CAMERA_SPEED: s->camera_speed = (s->camera_speed + 4 + step) % 4; break;
+    case SETTING_CAMERA_INVERT: s->camera_invert = (s->camera_invert + 3 + step) % 3; break;
     case SETTING_THEME: s->theme = (s->theme + UI_THEME_COUNT + step) % UI_THEME_COUNT; break;
     case SETTING_VOLUME: s->volume = (s->volume + 6 + step) % 6; break;
     case SETTING_MENU_AUDIO: s->mute_in_menus = !s->mute_in_menus; break;
+    case SETTING_MUSIC:
+        s->music_mode = (s->music_mode + MENU_MUSIC_MODE_COUNT + (unsigned)step) % MENU_MUSIC_MODE_COUNT;
+        break;
+    case SETTING_VOICE: s->voice_cues = !s->voice_cues; break;
+    case SETTING_SFX: s->sound_effects = !s->sound_effects; break;
     case SETTING_LID: s->lid_mode = (s->lid_mode + LID_MODE_COUNT + step) % LID_MODE_COUNT; break;
     case SETTING_NETWORK: s->net_weak = !s->net_weak; break;
     case SETTING_SHARE: s->share_reports = s->share_reports == SHARE_YES ? SHARE_NO : SHARE_YES; break;
@@ -1234,8 +1288,7 @@ static void draw_details_top(const App *app)
     }
     details_fact(x, y, "LAST PLAYED", value);
     const GamePrefs prefs = game_prefs_get(game->app_id);
-    details_fact(x + 118, y, "GAME OPTIONS",
-                 prefs.bitrate >= 0 || prefs.gyro >= 0 || prefs.layout >= 0 ? "Custom" : "Default");
+    details_fact(x + 118, y, "GAME OPTIONS", game_prefs_custom(&prefs) ? "Custom" : "Default");
     y += 38;
     ui_label(x, y, 11, UI_TEXT_FAINT, UI_ALIGN_LEFT, "STREAM");
     ui_text_fit(x, y + 14, 12, UI_TEXT_DIM, UI_ALIGN_LEFT, w, stream_profile_name());
@@ -1250,23 +1303,49 @@ static const char *option_value(const App *app, const GamePrefs *prefs, int row,
     static const char *const bitrates[STREAM_BITRATE_COUNT] = { "Adaptive", "Steady 1", "Steady 1.2", "Steady 1.5", "Sharp" };
     static const char *const gyros[GFN_GYRO_MODE_COUNT] = { "Off", "Always", "While aiming" };
     static const char *const layouts[2] = { "Position", "Letters" };
+    static const char *const speeds[4] = { "Slow", "Normal", "Fast", "Fastest" };
+    static const char *const inverts[3] = { "Off", "Up-down", "Both" };
+    static const char *const gyro_speeds[3] = { "Low", "Medium", "High" };
+    const AppSettings *s = &app->settings;
     const GfnClient *c = app->client;
+    /* This game's value, or "Default (what Settings says)", so a game's
+     * own choice is never a surprise. */
+    const char *const *names = NULL;
+    int own = -1;
+    unsigned global = 0, count = 1;
     switch (row) {
-    case OPTION_BITRATE:
-        if (prefs->bitrate >= 0) return bitrates[prefs->bitrate % STREAM_BITRATE_COUNT];
-        /* Say what Default means, so a game's own choice is never a surprise. */
-        snprintf(buffer, size, "Default (%s)", bitrates[app->settings.bitrate_mode % STREAM_BITRATE_COUNT]);
-        return buffer;
-    case OPTION_GYRO: return prefs->gyro < 0 ? "Default" : gyros[prefs->gyro % GFN_GYRO_MODE_COUNT];
-    case OPTION_LAYOUT: return prefs->layout < 0 ? "Default" : layouts[prefs->layout % 2];
-    case OPTION_MAPPING: return prefs->has_map ? "Custom  ·  A to edit" : "Default  ·  A to edit";
+    case OPTION_BITRATE: names = bitrates; own = prefs->bitrate; global = s->bitrate_mode; count = STREAM_BITRATE_COUNT; break;
+    case OPTION_CAMERA_SPEED: names = speeds; own = prefs->camera_speed; global = s->camera_speed; count = 4; break;
+    case OPTION_CAMERA_INVERT: names = inverts; own = prefs->camera_invert; global = s->camera_invert; count = 3; break;
+    case OPTION_GYRO: names = gyros; own = prefs->gyro; global = s->gyro_mode; count = GFN_GYRO_MODE_COUNT; break;
+    case OPTION_GYRO_SPEED: names = gyro_speeds; own = prefs->gyro_speed; global = s->gyro_speed; count = 3; break;
+    case OPTION_LAYOUT: names = layouts; own = prefs->layout; global = s->button_layout; count = 2; break;
+    case OPTION_MAPPING: return prefs->has_map ? "Custom" : "Default";
     case OPTION_CONNECTION:
-        if (!c->conn_tested_at) return "Press A to test";
+        if (!c->conn_tested_at) return "Not tested";
         snprintf(buffer, size, "%u ms  ·  %u.%u Mbps  ·  %u/3", c->conn_latency_ms, c->conn_kbps / 1000,
                  c->conn_kbps % 1000 / 100, c->conn_bars);
         return buffer;
     }
-    return "";
+    if (!names) return "";
+    if (own >= 0) return names[(unsigned)own % count];
+    snprintf(buffer, size, "Default (%s)", names[global % count]);
+    return buffer;
+}
+
+/* Whether this game changes the row from Settings. */
+static bool option_custom(const GamePrefs *prefs, int row)
+{
+    switch (row) {
+    case OPTION_BITRATE: return prefs->bitrate >= 0;
+    case OPTION_CAMERA_SPEED: return prefs->camera_speed >= 0;
+    case OPTION_CAMERA_INVERT: return prefs->camera_invert >= 0;
+    case OPTION_GYRO: return prefs->gyro >= 0;
+    case OPTION_GYRO_SPEED: return prefs->gyro_speed >= 0;
+    case OPTION_LAYOUT: return prefs->layout >= 0;
+    case OPTION_MAPPING: return prefs->has_map;
+    }
+    return false;
 }
 
 /* What the last connection check means for play. */
@@ -1297,31 +1376,59 @@ static void draw_options_sheet(const App *app, float p)
     const GamePrefs prefs = game_prefs_get(game->app_id);
     ui_rect(0, 0, UI_BOTTOM_WIDTH, UI_HEIGHT, ui_with_alpha(UI_BG, (u8)(0xF0 * p)));
     ui_offset(0.0f, (1.0f - p) * 10.0f);
-    ui_text(160, 3, 12, UI_ACCENT, UI_ALIGN_CENTER, "設定");
-    ui_label(160, 18, 11, UI_TEXT, UI_ALIGN_CENTER, "OPTIONS FOR THIS GAME");
-    ui_hline(16, 33, 288, UI_LINE);
-    static const char *const labels[OPTION_COUNT] = { "Bitrate", "Gyro aim", "Button layout", "Button mapping",
-                                                       "Connection" };
+    /* Whose options these are: the game's own name, not just "this game". */
+    ui_text(16, 3, 12, UI_ACCENT, UI_ALIGN_LEFT, "設定");
+    ui_label(42, 5, 11, UI_TEXT_FAINT, UI_ALIGN_LEFT, "GAME OPTIONS");
+    ui_text_fit(16, 18, 12, UI_TEXT, UI_ALIGN_LEFT, 222, game->title);
+    ui_button(OPT_CLOSE, "DONE", "完了", UI_BUTTON_NORMAL, pressed(app, OPT_CLOSE));
+    ui_hline(16, 36, 288, UI_LINE);
+    static const char *const labels[OPTION_COUNT] = {
+        "Bitrate", "Camera stick speed", "Invert camera", "Gyro aim", "Gyro speed", "Button layout",
+        "Button mapping", "Connection" };
+    static const char *const help[OPTION_COUNT] = {
+        "Picture detail for this game. Default follows Settings.",
+        "How fast the C-Stick turns the camera in this game.",
+        "Reverse the C-Stick in this game. Gyro is not inverted.",
+        "Aim by turning the console, in this game only.",
+        "How fast turning the console moves the camera here.",
+        "3DS A sends the pad's bottom button, or the one printed A.",
+        "Move any 3DS button to any controller button. A to edit.",
+        "",
+    };
+    /* Values sit in one column: steppers for the choices, an A chip for the
+     * two rows that open something. A lit dot marks what this game changes;
+     * everything else follows Settings. */
+    const float value_x = 152, value_w = 152, value_cx = value_x + value_w / 2;
     char buffer[64];
     for (int i = 0; i < OPTION_COUNT; ++i) {
-        const float y = OPT_ROW_Y + i * OPT_ROW_H;
+        const float y = OPT_ROW_Y + i * OPT_ROW_H, h = OPT_ROW_H - 3, cy = y + h / 2;
         const bool focus = i == app->options_index;
+        const bool action_row = i == OPTION_MAPPING || i == OPTION_CONNECTION;
         if (focus) {
-            ui_rect(12, y, 296, OPT_ROW_H - 4, UI_RAISED);
-            ui_rect(12, y, 2, OPT_ROW_H - 4, UI_ACCENT);
+            ui_rect(12, y, 296, h, UI_RAISED);
+            ui_rect(12, y, 2, h, UI_ACCENT);
         }
-        ui_text(24, y + 7, 12, focus ? UI_TEXT : UI_TEXT_DIM, UI_ALIGN_LEFT, labels[i]);
+        const bool custom = option_custom(&prefs, i);
+        if (custom) ui_circle(22, cy, 2.5f, UI_ACCENT);
+        ui_text_fit(30, y + 3, 12, focus ? UI_TEXT : UI_TEXT_DIM, UI_ALIGN_LEFT, value_x - 34, labels[i]);
         const char *value = option_value(app, &prefs, i, buffer, sizeof(buffer));
-        const bool custom = (i == OPTION_BITRATE && prefs.bitrate >= 0) ||
-                            (i == OPTION_GYRO && prefs.gyro >= 0) || (i == OPTION_LAYOUT && prefs.layout >= 0) ||
-                            (i == OPTION_MAPPING && prefs.has_map);
-        ui_text_fit(296, y + 7, 12, custom ? UI_ACCENT : focus ? UI_TEXT : UI_TEXT_DIM, UI_ALIGN_RIGHT,
-                    180, value);
+        const u32 value_color = custom ? UI_ACCENT : focus ? UI_TEXT : UI_TEXT_FAINT;
+        if (action_row) {
+            ui_text_fit(value_x + value_w - 22, y + 3, 12, value_color, UI_ALIGN_RIGHT, value_w - 26, value);
+            if (focus) ui_button_chip(value_x + value_w - 17, cy - 7.5f, "A", UI_ACCENT);
+        } else {
+            ui_text_fit(value_cx, y + 3, 12, value_color, UI_ALIGN_CENTER, value_w - 28, value);
+            if (focus) {
+                ui_triangle(value_x + 8, cy - 4.5f, value_x + 8, cy + 4.5f, value_x + 2, cy, UI_ACCENT);
+                ui_triangle(value_x + value_w - 8, cy - 4.5f, value_x + value_w - 8, cy + 4.5f,
+                            value_x + value_w - 2, cy, UI_ACCENT);
+            }
+        }
     }
-    ui_text_wrap(160, OPT_ROW_Y + OPTION_COUNT * OPT_ROW_H + 1, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, 292, 1, 14,
-                 app->options_index == OPTION_CONNECTION ? connection_advice(app->client)
-                 : "Default follows Settings. Only this game's sessions use these.");
-    ui_button(OPT_CLOSE, "DONE", "完了", UI_BUTTON_NORMAL, pressed(app, OPT_CLOSE));
+    const int index = app->options_index >= 0 && app->options_index < OPTION_COUNT ? app->options_index : 0;
+    ui_hline(16, 216, 288, UI_LINE);
+    ui_text_wrap(160, 219, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, 296, 2, 11,
+                 index == OPTION_CONNECTION ? connection_advice(app->client) : help[index]);
     ui_offset(0.0f, 0.0f);
 }
 
@@ -2027,10 +2134,11 @@ static void draw_touchpad(void)
         ui_rect(p.x, y, 1, 4, UI_LINE_STRONG);
         ui_rect(p.x + p.w - 1, y, 1, 4, UI_LINE_STRONG);
     }
-    ui_text(160, p.y + 30, 12, UI_ACCENT, UI_ALIGN_CENTER, "タッチパッド");
-    ui_label(160, p.y + 48, 11, UI_TEXT, UI_ALIGN_CENTER, "TOUCHPAD");
-    ui_text(160, p.y + 66, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, "Drag to move, tap to click");
-    ui_text(160, p.y + 81, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, "C-Stick moves, A clicks");
+    ui_text(160, p.y + 22, 12, UI_ACCENT, UI_ALIGN_CENTER, "マウス・キーボード");
+    ui_label(160, p.y + 40, 11, UI_TEXT, UI_ALIGN_CENTER, "MOUSE & KEYBOARD");
+    ui_text_fit(160, p.y + 58, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, 176, "Drag here to move, tap to click");
+    ui_text_fit(160, p.y + 73, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, 176, "C-Stick moves, A clicks, KEYS types");
+    ui_text_fit(160, p.y + 88, 11, UI_TEXT_FAINT, UI_ALIGN_CENTER, 176, "Tap MOUSE again for controller mode");
 }
 
 static void draw_stats(const App *app)
@@ -2179,7 +2287,14 @@ static void draw_stream_header(const App *app)
         return;
     }
     ui_circle(12, 11, 3.5f, t->input_ready ? UI_ACCENT : UI_KIN);
-    ui_text(20, 4, 12, UI_ACCENT, UI_ALIGN_LEFT, "配信");
+    /* Which way the buttons go right now: a gamepad, or mouse and keyboard. */
+    if (t->pointer_mode) {
+        ui_rect(19, 4, 44, 15, UI_ACCENT);
+        ui_label(41, 6, 11, UI_BG, UI_ALIGN_CENTER, "MOUSE");
+    } else {
+        ui_outline(19, 4, 44, 15, 1.0f, UI_LINE_STRONG);
+        ui_label(41, 6, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, "PAD");
+    }
     /* For the first seconds, teach the menu shortcut instead of the title. */
     if (app->stream_started_at && elapsed < 7000)
         ui_text_fit(160, 5, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, 190, "Hold START + SELECT for the menu");
@@ -2234,8 +2349,8 @@ static void draw_stream_bottom(const App *app, float overlay_p)
     const unsigned level = mvd_video_zoom_level();
     if (app->zone_index >= 0 && level) snprintf(zoom, sizeof(zoom), "ZONE %d", app->zone_index + 1);
     else snprintf(zoom, sizeof(zoom), "%s", level == 3 ? "2.0x" : level == 2 ? "1.5x" : level == 1 ? "1.2x" : "拡大");
-    const char *labels[4] = { "KEYS", "POINTER", "ZOOM", "MENU" };
-    const char *jp[4] = { "キー", "ポインタ", zoom, "メニュー" };
+    const char *labels[4] = { "KEYS", "MOUSE", "ZOOM", "MENU" };
+    const char *jp[4] = { "キー", "マウス", zoom, "メニュー" };
     const bool active[4] = { false, t->pointer_mode, level != 0, false };
     for (int i = 0; i < 4; ++i) {
         const UiRect r = stream_button(i);

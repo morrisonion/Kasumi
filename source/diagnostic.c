@@ -172,3 +172,69 @@ void diagnostic_log(const char *component, const char *format, ...)
     diagnostic_vlog(component, format, args);
     va_end(args);
 }
+
+/* ---- Flags ---------------------------------------------------------------- */
+
+enum { FLAG_SLOTS = 32, FLAG_CODE = 24 };
+static struct {
+    char code[FLAG_CODE];
+    unsigned count;
+    bool taken;
+} g_flags[FLAG_SLOTS];
+static unsigned g_flag_count;
+static LightLock g_flag_lock = 1;
+
+void diagnostic_flag(const char *code, const char *format, ...)
+{
+    if (!code || !code[0]) code = "unknown";
+    unsigned count = 0;
+    LightLock_Lock(&g_flag_lock);
+    unsigned i = 0;
+    while (i < g_flag_count && strncmp(g_flags[i].code, code, FLAG_CODE - 1)) ++i;
+    if (i == g_flag_count && g_flag_count < FLAG_SLOTS) {
+        snprintf(g_flags[i].code, FLAG_CODE, "%s", code);
+        g_flags[i].count = 0;
+        g_flags[i].taken = false;
+        ++g_flag_count;
+    }
+    if (i < g_flag_count) count = ++g_flags[i].count;
+    LightLock_Unlock(&g_flag_lock);
+    /* The first few of each, then every 50th: a flag that fires every frame
+     * must not push the rest of the log out. */
+    if (count > 5 && count % 50) return;
+    char text[DIAGNOSTIC_LINE - 64];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(text, sizeof(text), format ? format : "", args);
+    va_end(args);
+    diagnostic_log("FLAG", "%s #%u: %s", code, count ? count : 1, text);
+}
+
+const char *diagnostic_take_new_flag(void)
+{
+    const char *code = NULL;
+    LightLock_Lock(&g_flag_lock);
+    for (unsigned i = 0; i < g_flag_count && !code; ++i) {
+        if (g_flags[i].taken) continue;
+        g_flags[i].taken = true;
+        code = g_flags[i].code;
+    }
+    LightLock_Unlock(&g_flag_lock);
+    return code;
+}
+
+void diagnostic_flags_summary(char *out, size_t size)
+{
+    if (!out || !size) return;
+    out[0] = '\0';
+    size_t used = 0;
+    LightLock_Lock(&g_flag_lock);
+    for (unsigned i = 0; i < g_flag_count && used + 1 < size; ++i) {
+        const int n = snprintf(out + used, size - used, "%s%s x%u", used ? ", " : "", g_flags[i].code,
+                               g_flags[i].count);
+        if (n < 0) break;
+        used += (size_t)n;
+    }
+    LightLock_Unlock(&g_flag_lock);
+    if (used >= size) out[size - 1] = '\0';
+}

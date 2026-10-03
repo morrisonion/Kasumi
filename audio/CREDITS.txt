@@ -1,0 +1,15 @@
+Audio built into Kasumi (Makefile: audio/*.opus -> linked read-only data).
+
+music1.opus  "Bossa Nova Cafe Morning Breeze" by Alex Morgan, Pixabay 573876
+music2.opus  "Bossa Nova Morning Music" by Andriih, Pixabay 599227
+music3.opus  "Bossa Nova or Lofi" by TheBoysBeats, Pixabay 296432
+             Pixabay Content License. Leveled to -24 LUFS, 2 s fade-in,
+             3 s fade-out, Opus 48 kbit/s stereo.
+
+okaeri.opus, itterasshai.opus
+             Voice: VOICEVOX:春日部つむぎ. Music bed original, made with
+             tools/audio/greetings.py (sources in resources/sounds, resources/voice).
+
+sfx_*.opus   Menu sound effects, original, synthesised by tools/audio/sfx.py
+             (python tools/audio/sfx.py resources/sfx), then
+             ffmpeg -i resources/sfx/NAME.wav -c:a libopus -b:a 96k audio/sfx_NAME.opus

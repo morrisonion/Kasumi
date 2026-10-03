@@ -94,6 +94,8 @@ typedef struct {
     uint32_t last_video_timestamp;
     uint64_t last_video_arrival_at;
     unsigned video_src_skipped, video_late_arrivals, video_max_gap_ms;
+    /* The 5 s window behind each VIDEO rate line. */
+    unsigned video_log_seconds, video_log_kbps_sum, video_log_kbps_min;
     uint64_t last_au_drop_at;
     bool input_state_logged;
     uint16_t last_input_buttons;

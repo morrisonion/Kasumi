@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <string.h>
 
-static GfnInputConfig g_config = { GFN_LAYOUT_POSITION, 12, false, GFN_GYRO_OFF, 1 };
+static GfnInputConfig g_config = { GFN_LAYOUT_POSITION, 12, false, GFN_GYRO_OFF, 1, 1, 0 };
 static uint16_t g_virtual_buttons;
 static bool g_suppressed;
 static bool g_gyro_enabled;
@@ -78,6 +78,8 @@ void gfn_input_configure(const GfnInputConfig *config)
     if (config) g_config = *config;
     if (g_config.deadzone_percent > 40) g_config.deadzone_percent = 40;
     if (g_config.gyro_speed > 2) g_config.gyro_speed = 1;
+    if (g_config.camera_speed > 3) g_config.camera_speed = 1;
+    if (g_config.camera_invert > 2) g_config.camera_invert = 0;
     /* The gyroscope draws power, so it only runs while gyro aim is on. */
     const bool want = g_config.gyro_mode != GFN_GYRO_OFF;
     if (want && !g_gyro_enabled && R_SUCCEEDED(HIDUSER_EnableGyroscope())) {
@@ -194,13 +196,13 @@ uint16_t gfn_input_buttons_for_keys(u32 keys)
 
 /* Radial deadzone, rescaled so the deadzone edge is zero and the stick's
  * physical rim reaches full deflection in every direction. */
-static void scale_stick(int raw_x, int raw_y, int rim, int16_t *out_x, int16_t *out_y)
+static void scale_stick(int raw_x, int raw_y, int rim, float gain, int16_t *out_x, int16_t *out_y)
 {
     const float x = (float)raw_x, y = (float)raw_y;
     const float magnitude = sqrtf(x * x + y * y);
     const float deadzone = (float)rim * (float)g_config.deadzone_percent / 100.0f;
     if (magnitude <= deadzone || magnitude <= 0.0f) { *out_x = *out_y = 0; return; }
-    float scaled = (magnitude - deadzone) / ((float)rim - deadzone);
+    float scaled = (magnitude - deadzone) / ((float)rim - deadzone) * gain;
     if (scaled > 1.0f) scaled = 1.0f;
     const float factor = scaled * 32767.0f / magnitude;
     float fx = x * factor, fy = y * factor;
@@ -235,8 +237,14 @@ void gfn_input_read_3ds(GfnGamepadState *state)
     hidCircleRead(&circle);
     hidCstickRead(&cstick);
     /* The Circle Pad reaches about 150 at its rim; the C-Stick is shorter. */
-    scale_stick(circle.dx, circle.dy, 150, &state->left_x, &state->left_y);
-    scale_stick(cstick.dx, cstick.dy, 140, &state->right_x, &state->right_y);
+    scale_stick(circle.dx, circle.dy, 150, 1.0f, &state->left_x, &state->left_y);
+    /* Camera speed: Slow tops out at 70 %; Fast and Fastest reach a full
+     * turn with a lighter push on the short C-Stick. */
+    static const float camera_gain[] = { 0.7f, 1.0f, 1.3f, 1.6f };
+    scale_stick(cstick.dx, cstick.dy, 140, camera_gain[g_config.camera_speed], &state->right_x, &state->right_y);
+    /* Before the gyro, which keeps its own direction. */
+    if (g_config.camera_invert >= 1) state->right_y = (int16_t)-state->right_y;
+    if (g_config.camera_invert == 2) state->right_x = (int16_t)-state->right_x;
     apply_gyro(state, held);
 }
 
