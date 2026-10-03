@@ -8,6 +8,12 @@ typedef struct {
     char *body;
     size_t size;
     char error[160];
+    /* Where the request spent its time, for failure logs: curl's result,
+     * then ms to DNS, TCP connect, TLS and the end (0 = not reached), and
+     * the bytes of the request body that went out. */
+    int curl_code;
+    unsigned dns_ms, connect_ms, tls_ms, total_ms;
+    unsigned long long uploaded;
 } HttpResponse;
 
 bool http_global_init(void);

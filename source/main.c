@@ -344,6 +344,9 @@ static struct {
     bool has_game;
 } g_deferred;
 
+/* An automatic report is uploading (auto_report_tick). */
+static bool g_auto_inflight;
+
 static bool background_job(NetJobKind kind)
 {
     return kind == NET_JOB_SEND_STATS || kind == NET_JOB_UPDATE_CHECK || kind == NET_JOB_KEEP_LOGIN;
@@ -354,7 +357,12 @@ static bool submit_job(NetJobKind kind, const char *busy, const char *text, cons
 {
     if (!net_worker_submit(kind, text, game)) {
         const NetJobKind running = net_worker_current_job();
-        if (background_job(running) && !background_job(kind) && !g_deferred.set) {
+        /* An automatic report is background work too: a manual one waits
+         * for it instead of being refused behind a toast Settings never
+         * shows. */
+        const bool running_background =
+            background_job(running) || (running == NET_JOB_SEND_REPORT && g_auto_inflight);
+        if (running_background && !background_job(kind) && !g_deferred.set) {
             g_deferred.set = true;
             g_deferred.kind = kind;
             g_deferred.busy = busy;
@@ -2036,7 +2044,6 @@ static const char *current_status(void)
 #define AUTO_REPORTS_PER_RUN 3
 static char g_auto_trigger[72];
 static unsigned g_auto_sent;
-static bool g_auto_inflight;
 static u64 g_auto_queued_at;
 
 static void queue_auto_report(const char *trigger)
@@ -2460,9 +2467,11 @@ static void finish_jobs(void)
             open_modal(MODAL_REPORT_SENT, "送信完了", "REPORT SENT",
                        "Share this code on GitHub or in the Kasumi Discord so the developer can find your report.");
         } else {
-            char text[96];
-            snprintf(text, sizeof(text), "Report not sent: %.70s", report_error());
-            show_notice(text);
+            /* A modal, not a toast: reports are sent from Settings, which
+             * shows no toasts, so a failure looked like nothing happened. */
+            char text[192];
+            snprintf(text, sizeof(text), "%.110s. Check the Wi-Fi, then send it again.", report_error());
+            open_modal(MODAL_SEND_REPORT, "送信失敗", "REPORT NOT SENT", text);
         }
     }
     if (result.kind == NET_JOB_UPDATE_CHECK) {

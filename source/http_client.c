@@ -153,6 +153,15 @@ bool http_request(const char *method, const char *url, const char *user_agent,
     }
 
     const CURLcode result = curl_easy_perform(curl);
+    response->curl_code = (int)result;
+    {
+        curl_off_t value = 0;
+        if (curl_easy_getinfo(curl, CURLINFO_NAMELOOKUP_TIME_T, &value) == CURLE_OK) response->dns_ms = (unsigned)(value / 1000);
+        if (curl_easy_getinfo(curl, CURLINFO_CONNECT_TIME_T, &value) == CURLE_OK) response->connect_ms = (unsigned)(value / 1000);
+        if (curl_easy_getinfo(curl, CURLINFO_APPCONNECT_TIME_T, &value) == CURLE_OK) response->tls_ms = (unsigned)(value / 1000);
+        if (curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME_T, &value) == CURLE_OK) response->total_ms = (unsigned)(value / 1000);
+        if (curl_easy_getinfo(curl, CURLINFO_SIZE_UPLOAD_T, &value) == CURLE_OK) response->uploaded = (unsigned long long)value;
+    }
     /* Only the host is logged: paths and queries can hold session IDs. */
     char host[64] = "";
     {

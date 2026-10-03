@@ -162,10 +162,11 @@ static char *scrub(const char *in, size_t length)
     return out;
 }
 
-static json_t *scrubbed_file(const char *path)
+static json_t *scrubbed_file(const char *path, size_t cap)
 {
+    if (!cap) return json_string("");
     size_t length = 0;
-    char *raw = read_file(path, LOG_CAP, &length);
+    char *raw = read_file(path, cap, &length);
     if (!raw) return json_string("");
     char *clean = scrub(raw, length);
     free(raw);
@@ -298,79 +299,137 @@ bool report_previous_run_unclean(void)
     return same_version && !clean && lines >= 8;
 }
 
-bool report_send(const char *trigger)
-{
-    g_code[0] = g_error[0] = '\0';
-    if (!trigger || !trigger[0]) trigger = "manual";
-    if (!report_available()) return fail("Reports are not set up in this build");
-    diagnostic_log("REPORT", "sending (%s)", trigger);
-    diagnostic_checkpoint();
+/* How much a report carries, tried in turn. A full report is a few hundred
+ * KB packed; on weak Wi-Fi it could time out or run out of memory, and the
+ * player saw "Sending" and then nothing (beta.28). A lighter report keeps
+ * the end of this run's log, which matters most. */
+typedef struct {
+    size_t log, previous, older;
+    bool dump;
+    long timeout;
+    const char *tag;
+} ReportSize;
 
-    char sent_at[32];
+static const ReportSize REPORT_SIZES[] = {
+    { LOG_CAP, LOG_CAP, LOG_CAP, true, 45, "" },
+    { 256 * 1024, 128 * 1024, 0, false, 45, " (smaller)" },
+    { 96 * 1024, 0, 0, false, 30, " (smallest)" },
+};
+
+/* The upload body, or NULL (with the reason in g_error). */
+static char *report_body(const char *trigger, const ReportSize *size, size_t *raw_length, size_t *packed_length)
+{
+    char sent_at[32], why[96];
     const time_t now = time(NULL);
     strftime(sent_at, sizeof(sent_at), "%Y-%m-%dT%H:%M:%S", gmtime(&now));
+    snprintf(why, sizeof(why), "%s%s", trigger, size->tag);
     json_t *root = json_pack("{s:s,s:s,s:s,s:s,s:s}", "app", APP_NAME, "version", APP_VERSION,
-                             "build", APP_BUILD, "sent_at", sent_at, "trigger", trigger);
-    if (!root) return fail("Out of memory");
+                             "build", APP_BUILD, "sent_at", sent_at, "trigger", why);
+    if (!root) {
+        fail("Out of memory");
+        return NULL;
+    }
     /* This run's flags (see diagnostic_flag): the service lists them first. */
     char flags[512];
     diagnostic_flags_summary(flags, sizeof(flags));
     json_object_set_new(root, "flags", json_string(flags));
-    json_object_set_new(root, "log", scrubbed_file(DIAGNOSTIC_PATH));
-    json_object_set_new(root, "log_older", scrubbed_file(DIAGNOSTIC_OLDER_PATH));
-    json_object_set_new(root, "previous_log", scrubbed_file(DIAGNOSTIC_PREVIOUS_PATH));
-    json_t *settings = scrubbed_file(APP_DATA_DIR "/settings.json");
+    json_object_set_new(root, "log", scrubbed_file(DIAGNOSTIC_PATH, size->log));
+    json_object_set_new(root, "log_older", scrubbed_file(DIAGNOSTIC_OLDER_PATH, size->older));
+    json_object_set_new(root, "previous_log", scrubbed_file(DIAGNOSTIC_PREVIOUS_PATH, size->previous));
+    json_t *settings = scrubbed_file(APP_DATA_DIR "/settings.json", LOG_CAP);
     json_error_t parse_error;
     json_t *parsed = json_loads(json_string_value(settings), 0, &parse_error);
     const char *install = json_is_object(parsed) ? json_string_value(json_object_get(parsed, "install_id")) : NULL;
     json_object_set_new(root, "install", json_string(install ? install : ""));
     json_decref(parsed);
     json_object_set_new(root, "settings", settings);
-    json_t *dump = recent_dump();
-    if (dump) json_object_set_new(root, "dump", dump);
+    if (size->dump) {
+        json_t *dump = recent_dump();
+        if (dump) json_object_set_new(root, "dump", dump);
+    }
     char *report = json_dumps(root, JSON_COMPACT);
     json_decref(root);
-    if (!report) return fail("Out of memory");
-
-    size_t packed_length = 0;
-    unsigned char *packed = gzip(report, strlen(report), &packed_length);
-    const size_t report_length = strlen(report);
+    if (!report) {
+        fail("Out of memory");
+        return NULL;
+    }
+    *raw_length = strlen(report);
+    unsigned char *packed = gzip(report, *raw_length, packed_length);
     free(report);
-    if (!packed) return fail("Could not compress the report");
-    char *payload = base64(packed, packed_length);
+    if (!packed) {
+        fail("Could not compress the report");
+        return NULL;
+    }
+    char *payload = base64(packed, *packed_length);
     free(packed);
-    if (!payload) return fail("Out of memory");
+    if (!payload) {
+        fail("Out of memory");
+        return NULL;
+    }
     json_t *upload = json_pack("{s:s,s:s}", "format", "kasumi-report-1", "payload", payload);
     free(payload);
     char *body = upload ? json_dumps(upload, JSON_COMPACT) : NULL;
     json_decref(upload);
-    if (!body) return fail("Out of memory");
+    if (!body) fail("Out of memory");
+    return body;
+}
+
+bool report_send(const char *trigger)
+{
+    g_code[0] = g_error[0] = 0;
+    if (!trigger || !trigger[0]) trigger = "manual";
+    if (!report_available()) return fail("Reports are not set up in this build");
+    diagnostic_log("REPORT", "sending (%s)", trigger);
+    diagnostic_checkpoint();
 
     static const char *const headers[] = { "Content-Type: application/json", "Accept: application/json" };
-    HttpResponse response;
-    http_next_request(30, NULL, NULL);
-    const bool sent = http_request("POST", REPORT_URL, "Kasumi-3DS", headers, 2, body, 16 * 1024, &response);
-    free(body);
-    if (!sent) {
-        char message[96];
-        snprintf(message, sizeof(message), "No connection: %.70s", response.error);
-        return fail(message);
-    }
-    const long status = response.status;
-    json_error_t error;
-    json_t *reply = json_loadb(response.body ? response.body : "", response.size, 0, &error);
-    http_response_free(&response);
-    const char *code = json_is_object(reply) ? json_string_value(json_object_get(reply, "code")) : NULL;
-    if (status == 200 && code && strlen(code) == 6) {
-        snprintf(g_code, sizeof(g_code), "%.3s-%.3s", code, code + 3);
+    const unsigned attempts = sizeof(REPORT_SIZES) / sizeof(REPORT_SIZES[0]);
+    for (unsigned attempt = 0; attempt < attempts; ++attempt) {
+        const ReportSize *size = &REPORT_SIZES[attempt];
+        size_t raw_length = 0, packed_length = 0;
+        char *body = report_body(trigger, size, &raw_length, &packed_length);
+        if (!body) continue; /* out of memory at this size: a lighter one may fit */
+        const size_t body_length = strlen(body);
+        HttpResponse response;
+        http_next_request(size->timeout, NULL, NULL);
+        const bool sent = http_request("POST", REPORT_URL, "Kasumi-3DS", headers, 2, body, 16 * 1024, &response);
+        free(body);
+        /* Where it broke: no DNS, no connection, TLS, or a slow upload. */
+        diagnostic_log("REPORT", "attempt %u%s: %lu bytes, %lu packed, %lu to send; http=%ld curl=%d "
+                       "dns=%u connect=%u tls=%u total=%u ms, %llu sent%s%.80s",
+                       attempt + 1, size->tag, (unsigned long)raw_length, (unsigned long)packed_length,
+                       (unsigned long)body_length, response.status, response.curl_code, response.dns_ms,
+                       response.connect_ms, response.tls_ms, response.total_ms, response.uploaded,
+                       sent ? "" : "; ", sent ? "" : response.error);
+        if (!sent) {
+            const bool cancelled = !strcmp(response.error, "Cancelled");
+            char message[96];
+            snprintf(message, sizeof(message), "No connection: %.70s", response.error);
+            http_response_free(&response);
+            if (cancelled) return fail("Cancelled");
+            fail(message);
+            continue;
+        }
+        const long status = response.status;
+        json_error_t error;
+        json_t *reply = json_loadb(response.body ? response.body : "", response.size, 0, &error);
+        http_response_free(&response);
+        const char *code = json_is_object(reply) ? json_string_value(json_object_get(reply, "code")) : NULL;
+        if (status == 200 && code && strlen(code) == 6) {
+            snprintf(g_code, sizeof(g_code), "%.3s-%.3s", code, code + 3);
+            json_decref(reply);
+            diagnostic_log("REPORT", "sent code=%s bytes=%lu packed=%lu", g_code,
+                           (unsigned long)raw_length, (unsigned long)packed_length);
+            return true;
+        }
         json_decref(reply);
-        diagnostic_log("REPORT", "sent code=%s bytes=%lu packed=%lu", g_code,
-                       (unsigned long)report_length, (unsigned long)packed_length);
-        return true;
+        if (status == 429) return fail("Too many reports from this network: try again in an hour");
+        char message[64];
+        snprintf(message, sizeof(message), "The report service answered HTTP %ld", status);
+        fail(message);
+        /* Too large or a server hiccup: lighter may go through. Anything
+         * else would be refused again. */
+        if (status != 413 && status < 500) return false;
     }
-    json_decref(reply);
-    if (status == 429) return fail("Too many reports from this network: try again in an hour");
-    char message[64];
-    snprintf(message, sizeof(message), "The report service answered HTTP %ld", status);
-    return fail(message);
+    return false;
 }
