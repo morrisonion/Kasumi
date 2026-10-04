@@ -2991,26 +2991,31 @@ static void launch_failed(void)
  * back to 30 for this game rather than play on lagging. */
 static bool fps60_watchdog(u64 now)
 {
-    static u64 window_at;
+    static u64 window_at, backed_up_since;
     static unsigned long long sum_base;
-    static unsigned count_base, heavy_windows, backed_up_since_ms;
+    static unsigned count_base, heavy_windows;
+    /* The first keyframe waits ~0.5 s for the decoder to set itself up, so
+     * frames always queue at the start (beta.33 report QQPDYV fell back 75 ms
+     * after the first frame): watch only after 5 s of picture. */
     if (stream_profile_fps() < 60 || g_app.view != VIEW_STREAM || !g_app.stream_started_at ||
-        g_transport.state != WEBRTC_CONNECTED) {
+        g_transport.state != WEBRTC_CONNECTED || now < g_app.stream_started_at + 5000) {
         window_at = 0;
         heavy_windows = 0;
-        backed_up_since_ms = 0;
+        backed_up_since = 0;
         return false;
     }
     unsigned long long sum;
     unsigned count, max_us;
     mvd_video_decode_totals(&sum, &count, &max_us, false);
     /* Frames waiting to be decoded: more than ~4 (67 ms) for 2 s is lag. */
+    /* Beta.33 stored "since" as now|1, one past now on even milliseconds,
+     * so now - since wrapped and the 2 s test passed at once. */
     if (mvd_video_pending_units() > 4) {
-        if (!backed_up_since_ms) backed_up_since_ms = (unsigned)now | 1u;
+        if (!backed_up_since) backed_up_since = now;
     } else {
-        backed_up_since_ms = 0;
+        backed_up_since = 0;
     }
-    const bool backed_up = backed_up_since_ms && (unsigned)now - backed_up_since_ms >= 2000;
+    const bool backed_up = backed_up_since && now >= backed_up_since + 2000;
     if (!window_at || count < count_base) {
         window_at = now;
         sum_base = sum;
@@ -3032,7 +3037,7 @@ static bool fps60_watchdog(u64 now)
         diagnostic_flag("fps60-fallback", "%u frames waiting to decode for 2 s; back to 30 fps",
                         mvd_video_pending_units());
     heavy_windows = 0;
-    backed_up_since_ms = 0;
+    backed_up_since = 0;
     window_at = 0;
     stream_profile_block_fps60(true);
     show_notice("This game is too heavy for 60 fps on the 3DS - switching to 30");
