@@ -281,6 +281,8 @@ const STAT_FIELDS = {
   k: "number", kn: "number", kx: "number", f: "number", rp: "number", sk: "number",
   dr: "number", lo: "number", kf: "number", rs: "number", cc: "number", rc: "number",
   da: "number", dx: "number", sl: "number", lm: "number",
+  // Frame rate asked for (30/60) and whether 60 fell back to 30.
+  fr: "number", fb: "number",
 };
 
 async function limited(env, request, prefix, perHour) {

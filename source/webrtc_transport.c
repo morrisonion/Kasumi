@@ -229,6 +229,7 @@ static char *build_nvst(const char *answer)
         !sdp_value(answer, "a=fingerprint:sha-256 ", fingerprint, sizeof(fingerprint))) return NULL;
     char *out = calloc(1, 4096);
     if (!out) return NULL;
+    const bool sixty = stream_profile_fps() >= 60;
     snprintf(out, 4096,
         "v=0\no=SdpTest test_id_13 14 IN IPv4 127.0.0.1\ns=-\nt=0 0\n"
         "a=general.icePassword:%s\na=general.iceUserNameFragment:%s\na=general.dtlsFingerprint:%s\n"
@@ -236,7 +237,7 @@ static char *build_nvst(const char *answer)
         "a=vqos.fec.rateDropWindow:10\na=vqos.fec.minRequiredFecPackets:2\n"
         "a=vqos.drc.minRequiredBitrateCheckEnabled:1\na=vqos.fec.repairMinPercent:6\n"
         "a=vqos.fec.repairPercent:8\na=vqos.fec.repairMaxPercent:30\n"
-        "a=vqos.dynamicStreamingMode:%u\na=vqos.bllFec.enable:0\na=vqos.drc.enable:1\n"
+        "a=vqos.dynamicStreamingMode:%u\na=vqos.bllFec.enable:0\na=vqos.drc.enable:%u\n%s"
         "a=bwe.useOwdCongestionControl:1\na=video.enableRtpNack:1\n"
         "a=vqos.bw.txRxLag.minFeedbackTxDeltaMs:200\na=vqos.drc.bitrateIirFilterFactor:18\n"
         "a=video.packetSize:1140\na=video.rtpNackQueueLength:1024\n"
@@ -244,7 +245,7 @@ static char *build_nvst(const char *answer)
         "a=packetPacing.numGroups:%u\na=packetPacing.minNumPacketsPerGroup:4\n"
         "a=packetPacing.minNumPacketsFrame:4\na=packetPacing.maxDelayUs:%u\n"
         "a=video.mapRtpTimestampsToFrames:1\na=video.clientViewportWd:%u\n"
-        "a=video.clientViewportHt:%u\na=video.maxFPS:%u\na=video.maxNumReferenceFrames:4\n"
+        "a=video.clientViewportHt:%u\na=video.maxFPS:%u\na=video.maxNumReferenceFrames:%u\n"
         /* The peak and limit attributes stay: beta.25 tried the web client's
          * set without them, the rate did not rise, and NVIDIA then ignored the
          * cap (Weak's 1 Mbps ran at ~1.3 on the wire, with ~3 resends/s). */
@@ -261,9 +262,15 @@ static char *build_nvst(const char *answer)
         "m=application 0 RTP/AVP\na=msid:input_1\na=ri.partialReliableThresholdMs:16\n"
         "a=ri.hidDeviceMask:4294967295\na=ri.enablePartiallyReliableTransferGamepad:15\n"
         "a=ri.enablePartiallyReliableTransferHid:4294967295\n",
-        pwd, ufrag, fingerprint, stream_profile_dynamic_mode(),
+        pwd, ufrag, fingerprint, sixty ? 0u : stream_profile_dynamic_mode(), sixty ? 0u : 1u,
+        /* At 60 fps NVIDIA's dynamic resolution and frame-rate control
+         * flipped the stream between 30 and 60 with a new IDR each time
+         * (80 in 45 s, probe of beta.32); OpenNOW Vita turns it all off. */
+        sixty ? "a=vqos.dfc.enable:0\na=vqos.dfc.adjustResAndFps:0\na=vqos.resControl.cpmRtc.enable:0\n"
+                "a=vqos.resControl.cpmRtc.featureMask:0\na=vqos.resControl.cpmRtc.minResolutionPercent:100\n"
+                "a=vqos.resControl.cpmRtc.resolutionChangeHoldonMs:999999\n" : "",
         stream_profile_pacing_groups(), stream_profile_pacing_delay_us(),
-        stream_profile_width(), stream_profile_height(), stream_profile_fps(),
+        stream_profile_width(), stream_profile_height(), stream_profile_fps(), sixty ? 1u : 4u,
         stream_profile_initial_bitrate(), stream_profile_max_bitrate(),
         stream_profile_max_bitrate(), stream_profile_min_bitrate(),
         stream_profile_max_bitrate(), stream_profile_max_bitrate(),
@@ -382,7 +389,7 @@ static void on_video(const PeerVideoPacket *packet, void *userdata)
                        packet->size > 4 ? p[4] : 0);
     }
     if (t->video_access_units == 1) diagnostic_checkpoint();
-    if (stream_profile_probing()) return;
+    if (stream_profile_probing() && !stream_profile_probe_decode()) return;
     /* MVD takes the coded size: whole 16-pixel macroblocks. The SPS size is
      * the cropped one, which NVIDIA's adaptive resolution makes odd (beta.21:
      * 726x544 and 680x544 were refused with D9617108 / D961710D, hundreds of

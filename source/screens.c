@@ -207,9 +207,7 @@ static const SettingEntry SETTING_ENTRIES[] = {
     { SETTING_FAST_INPUT, NULL, NULL },
     { -1, "画質", "PICTURE" },
     { SETTING_RESOLUTION, NULL, NULL },
-    /* SETTING_FRAME_RATE stays hidden: at 60 fps the decoder averaged
-     * 15 ms of a 16.7 ms frame and NVIDIA flipped between 30 and 60
-     * (test report Z44BDW), so it hitched. Next try: 800x480. */
+    { SETTING_FRAME_RATE, NULL, NULL },
     { SETTING_BITRATE, NULL, NULL },
     { SETTING_VIDEO_SHARPEN, NULL, NULL },
     { SETTING_VIDEO_COLOR, NULL, NULL },
@@ -490,7 +488,7 @@ static const char *setting_value(const App *app, int setting)
     case SETTING_TOUCH_CAMERA: return s->touch_camera == 1 ? "Stick" : s->touch_camera == 2 ? "Trackpad" : "Off";
     case SETTING_TOUCH_STICK_SIZE:
         return s->touch_stick_size == 0 ? "Small" : s->touch_stick_size == 2 ? "Large" : "Medium";
-    case SETTING_FRAME_RATE: return s->fps60 ? "60 fps (test)" : "30 fps";
+    case SETTING_FRAME_RATE: return s->fps60 ? "60 fps (experimental)" : "30 fps";
     case SETTING_THEME: return ui_theme_name((UiTheme)s->theme);
     case SETTING_VOLUME: {
         static const char *const levels[6] = { "Muted", "20 %", "40 %", "60 %", "80 %", "100 %" };
@@ -603,9 +601,10 @@ static const char *setting_description(const App *app, int setting)
             ? "About 1 Mbps: smoothest on weak Wi-Fi or a phone hotspot, a little softer. Next launch."
             : "A fixed rate. If the stats show RESENT/S climbing, pick a lower one. Next launch.";
     case SETTING_FRAME_RATE:
+        if (!s->wide_video) return "Needs Screen mode: Wide 800. 60 frames a second for smoother motion.";
         return s->fps60
-            ? "Test: twice the frames for smoother motion, but each frame gets half the data, so it's softer. Some frames may be dropped. Next launch."
-            : "30 frames a second: the tested setting, with the most detail per frame. Next launch.";
+            ? "Experimental: smoother motion in lighter games, a softer picture. Heavy games can lag, so Kasumi switches them back to 30 by itself. Next launch."
+            : "30 frames a second: the most detail in every frame. Next launch.";
     case SETTING_TOUCH_STICK_SIZE:
         return s->touch_stick_size == 0 ? "A short push turns at full speed: quick, for small thumbs or fast games."
              : s->touch_stick_size == 2 ? "A long push for full speed: finer control when aiming slowly."

@@ -194,15 +194,6 @@ static void render_wide_video(bool draw_bottom)
          * frames are only looked at under the transport lock. */
         webrtc_transport_lock();
         unsigned ready = mvd_video_ready_frames();
-        while (ready > reserve + 3) {
-            mvd_video_skip_oldest_frame();
-            --ready;
-            ++skipped;
-            ++g_perf.skipped;
-        }
-        /* Strict cadence, two vblanks at 30 fps and one at 60: a frame is
-         * never shown for a shorter time than the others (that reads as a
-         * hitch too); overflow is trimmed above. */
         /* The rate NVIDIA really sends, not the one asked for: a 60 fps test
          * that got 30 showed every frame twice as "repeated" and grew the
          * reserve (test report ZUFZFS). Decoded frames over ~2 s. */
@@ -211,6 +202,9 @@ static void render_wide_video(bool draw_bottom)
         static bool sixty;
         const unsigned decoded_now = mvd_video_decoded_frames();
         if (!rate_since || decoded_now < rate_frames) {
+            /* Until measured, trust the rate asked for (the first 2 s of a
+             * 60 fps stream paced as 30 skipped 62 frames). */
+            sixty = stream_profile_fps() >= 60;
             rate_since = now_ms;
             rate_frames = decoded_now;
         } else if (now_ms - rate_since >= 2000) {
@@ -221,6 +215,17 @@ static void render_wide_video(bool draw_bottom)
             rate_since = now_ms;
             rate_frames = decoded_now;
         }
+        /* The same cap at 60 fps: a longer queue there was felt as input
+         * lag (report EM7YGV). */
+        while (ready > reserve + 3) {
+            mvd_video_skip_oldest_frame();
+            --ready;
+            ++skipped;
+            ++g_perf.skipped;
+        }
+        /* Strict cadence, two vblanks at 30 fps and one at 60: a frame is
+         * never shown for a shorter time than the others (that reads as a
+         * hitch too); overflow is trimmed above. */
         const u32 cadence = sixty ? 1 : 2;
         if (ready && since >= cadence) {
             present = true;
@@ -575,6 +580,8 @@ static void launch_game(const GfnGame *game)
     prepare_game_session(game);
     g_app.limit_wait_until = g_app.limit_retry_at = 0;
     g_app.limit_unclosable = g_app.limit_rate = g_app.limit_busy = false;
+    /* Each game gets a fresh try at 60 fps. */
+    stream_profile_block_fps60(false);
     launch_begin(false, stream_profile_weak(), g_app.auto_weak);
     submit_job(NET_JOB_START_SESSION, "Creating your cloud session...", NULL, &g_current_game);
     if (g_app.settings.voice_cues) menu_audio_cue(MENU_CUE_ITTERASSHAI);
@@ -626,6 +633,8 @@ static bool session_gone(void)
 {
     return g_signal.state == NVST_SIGNAL_ERROR && (g_signal.upgrade_http == 404 || g_signal.upgrade_http == 410);
 }
+
+static bool fps60_watchdog(u64 now);
 
 static void retry_session(void)
 {
@@ -2134,6 +2143,7 @@ static void track_session(void)
     /* The video thread can stamp a frame after `now` was read: unsigned
      * now - last then wrapped to 2^64 and every such reconnect in beta.23
      * reports was bogus (one broke a working game). */
+    if (fps60_watchdog(now)) return;
     const u64 last_frame = g_transport.last_decoded_frame_at;
     const bool frozen = g_app.view == VIEW_STREAM && g_transport.state == WEBRTC_CONNECTED &&
                         last_frame && now > last_frame && now - last_frame > 12000 &&
@@ -2241,15 +2251,20 @@ static void track_session(void)
 /* If APP_DATA_DIR/probe.txt exists, each "WxH" line launches a game (the
  * first library entry, or the first whose title contains "game=<text>"),
  * records the SPS resolution NVIDIA actually encodes, and ends the session.
- * "WxH sharp" asks for the old prefilter; each run then watches 45 s of
- * video and counts IDRs.
+ * "WxH sharp" asks for the old prefilter, "WxH@60" for 60 frames a second;
+ * each run then watches 45 s of video: IDRs, the frame rate that arrived,
+ * decode time and frames repeated or skipped (is 60 fps decodable?).
  * Results go to probe-results.txt, outside the capped diagnostic log. */
 enum { PROBE_MAX = 16 };
 enum { PROBE_OFF, PROBE_LIBRARY, PROBE_LAUNCH, PROBE_WAIT_SPS, PROBE_LEAVE, PROBE_DONE };
 static struct {
     unsigned width[PROBE_MAX], height[PROBE_MAX];
     bool sharp[PROBE_MAX];
+    bool fps60[PROBE_MAX];
+    bool decode[PROBE_MAX];
     unsigned count, index;
+    unsigned frames_base, repeated_base, skipped_base, decode_count_base, au_base, reconnect_base;
+    unsigned long long decode_sum_base;
     unsigned idr_base, pli_base;
     u64 video_since;
     bool offer_dumped;
@@ -2287,6 +2302,8 @@ static void probe_load(void)
             g_probe.width[g_probe.count] = w;
             g_probe.height[g_probe.count] = h;
             g_probe.sharp[g_probe.count] = strstr(line, "sharp") != NULL;
+            g_probe.fps60[g_probe.count] = strstr(line, "@60") != NULL;
+            g_probe.decode[g_probe.count] = g_probe.fps60[g_probe.count] || strstr(line, "decode") != NULL;
             ++g_probe.count;
         }
     }
@@ -2295,7 +2312,7 @@ static void probe_load(void)
     stream_profile_set_probing(true);
     g_probe.phase = PROBE_LIBRARY;
     g_probe.since = osGetTime();
-    probe_result("probe start: %u resolutions, game filter \"%s\"", g_probe.count, g_probe.game);
+    probe_result("probe start (build " APP_BUILD "): %u resolutions, game filter \"%s\"", g_probe.count, g_probe.game);
 }
 
 static const GfnGame *probe_game(void)
@@ -2342,14 +2359,18 @@ static void probe_tick(void)
         if (g_probe.index >= g_probe.count) {
             g_probe.phase = PROBE_DONE;
             stream_profile_set_override(0, 0);
+            stream_profile_set_probing(false);
+            stream_profile_set_probe_decode(false);
             settings_apply_picture(&g_app.settings);
             probe_result("probe finished");
             break;
         }
         stream_profile_set_override(w, h);
         stream_profile_set_sharpen(g_probe.sharp[g_probe.index]);
+        stream_profile_set_fps60(g_probe.fps60[g_probe.index]);
+        stream_profile_set_probe_decode(g_probe.decode[g_probe.index]);
         g_app.modal = MODAL_NONE;
-        probe_result("request %ux%u%s (%s)", w, h,
+        probe_result("request %ux%u%s%s (%s)", w, h, g_probe.fps60[g_probe.index] ? "@60" : "",
                      g_probe.sharp[g_probe.index] ? " sharp" : "", probe_game()->title);
         launch_game(probe_game());
         g_probe.phase = PROBE_WAIT_SPS;
@@ -2366,6 +2387,13 @@ static void probe_tick(void)
             g_probe.video_since = now;
             g_probe.idr_base = g_transport.video_idr_units;
             g_probe.pli_base = g_transport.keyframe_requests;
+            g_probe.frames_base = mvd_video_decoded_frames();
+            g_probe.au_base = g_transport.video_access_units;
+            g_probe.reconnect_base = g_perf.reconnects;
+            g_probe.repeated_base = g_perf.repeated;
+            g_probe.skipped_base = g_perf.skipped;
+            unsigned decode_max;
+            mvd_video_decode_totals(&g_probe.decode_sum_base, &g_probe.decode_count_base, &decode_max, true);
             break;
         } else if (g_probe.video_since) {
             if (now - g_probe.video_since < 45000) break;
@@ -2373,6 +2401,17 @@ static void probe_tick(void)
                          g_transport.video_idr_units - g_probe.idr_base,
                          g_transport.keyframe_requests - g_probe.pli_base,
                          g_transport.video_access_units, g_transport.video_kbps);
+            unsigned long long decode_sum;
+            unsigned decode_count, decode_max;
+            mvd_video_decode_totals(&decode_sum, &decode_count, &decode_max, false);
+            const unsigned decoded = decode_count - g_probe.decode_count_base;
+            probe_result("  45 s: %u fps sent, %u frames decoded, decode avg %llu us max %u us, repeated %u, "
+                         "skipped %u, reconnects %u, now %ux%u",
+                         (g_transport.video_access_units - g_probe.au_base) / 45, decoded,
+                         decoded ? (decode_sum - g_probe.decode_sum_base) / decoded : 0ull, decode_max,
+                         g_perf.repeated - g_probe.repeated_base, g_perf.skipped - g_probe.skipped_base,
+                         g_perf.reconnects - g_probe.reconnect_base,
+                         g_transport.video_source_width, g_transport.video_source_height);
         } else if (g_app.modal == MODAL_ERROR) {
             probe_result("request %ux%u -> launch failed: %s", w, h, g_client.status);
             g_app.modal = MODAL_NONE;
@@ -2944,6 +2983,62 @@ static void launch_failed(void)
     if (strcmp(g_client.fail_code, "limited") && strcmp(g_client.fail_code, "entitlement"))
         queue_auto_report("launch-failed");
     launch_end(g_client.fail_code[0] ? g_client.fail_code : "error", launch_share_id());
+}
+
+/* 60 fps (experimental) needs the decoder under 16.7 ms a frame. When a
+ * game is too heavy for it (DOOM Eternal: 15-18 ms, then a full queue and
+ * freezes, report EM7YGV), frames pile up and are felt as input lag: go
+ * back to 30 for this game rather than play on lagging. */
+static bool fps60_watchdog(u64 now)
+{
+    static u64 window_at;
+    static unsigned long long sum_base;
+    static unsigned count_base, heavy_windows, backed_up_since_ms;
+    if (stream_profile_fps() < 60 || g_app.view != VIEW_STREAM || !g_app.stream_started_at ||
+        g_transport.state != WEBRTC_CONNECTED) {
+        window_at = 0;
+        heavy_windows = 0;
+        backed_up_since_ms = 0;
+        return false;
+    }
+    unsigned long long sum;
+    unsigned count, max_us;
+    mvd_video_decode_totals(&sum, &count, &max_us, false);
+    /* Frames waiting to be decoded: more than ~4 (67 ms) for 2 s is lag. */
+    if (mvd_video_pending_units() > 4) {
+        if (!backed_up_since_ms) backed_up_since_ms = (unsigned)now | 1u;
+    } else {
+        backed_up_since_ms = 0;
+    }
+    const bool backed_up = backed_up_since_ms && (unsigned)now - backed_up_since_ms >= 2000;
+    if (!window_at || count < count_base) {
+        window_at = now;
+        sum_base = sum;
+        count_base = count;
+    } else if (now - window_at >= 2000) {
+        const unsigned frames = count - count_base;
+        const unsigned avg = frames ? (unsigned)((sum - sum_base) / frames) : 0;
+        /* Three 2 s windows in a row over 15.5 ms: no headroom left. */
+        heavy_windows = frames >= 60 && avg > 15500 ? heavy_windows + 1 : 0;
+        window_at = now;
+        sum_base = sum;
+        count_base = count;
+        if (heavy_windows >= 3) {
+            diagnostic_flag("fps60-fallback", "decode %u us a frame over 6 s; back to 30 fps", avg);
+        }
+    }
+    if (heavy_windows < 3 && !backed_up) return false;
+    if (backed_up)
+        diagnostic_flag("fps60-fallback", "%u frames waiting to decode for 2 s; back to 30 fps",
+                        mvd_video_pending_units());
+    heavy_windows = 0;
+    backed_up_since_ms = 0;
+    window_at = 0;
+    stream_profile_block_fps60(true);
+    show_notice("This game is too heavy for 60 fps on the 3DS - switching to 30");
+    ++g_perf.reconnects;
+    retry_session();
+    return true;
 }
 
 /* The limit-wait countdown, and its retry. */

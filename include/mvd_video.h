@@ -44,6 +44,8 @@ void mvd_video_zoom_position(unsigned *x, unsigned *y);
 void mvd_video_close(void);
 bool mvd_video_active(void);
 unsigned mvd_video_decoded_frames(void);
+/* Encoded frames waiting for the decoder (a rough read, no lock). */
+unsigned mvd_video_pending_units(void);
 /* Frames lost upstream (each held the picture until a keyframe), ever. */
 unsigned mvd_video_frames_lost(void);
 /* Decode time totals since start (microseconds); `reset_max` restarts the

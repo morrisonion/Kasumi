@@ -936,6 +936,7 @@ void mvd_video_close(void)
 
 bool mvd_video_active(void) { return g_active; }
 unsigned mvd_video_decoded_frames(void) { return g_frames; }
+unsigned mvd_video_pending_units(void) { return g_queue_count; }
 unsigned mvd_video_frames_lost(void) { return g_frames_lost; }
 
 void mvd_video_decode_totals(unsigned long long *sum_us, unsigned *count, unsigned *max_us, bool reset_max)

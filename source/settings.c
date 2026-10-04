@@ -183,8 +183,10 @@ void settings_apply_picture(const AppSettings *settings)
 {
     stream_profile_configure(settings->wide_video, settings->bitrate_mode);
     stream_profile_set_sharpen(settings->sharpen);
-    /* The 60 fps test is hidden for now (screens.c): always 30. */
-    stream_profile_set_fps60(false);
+    /* 60 fps only in Wide mode (GPU pacing; the classic path writes the
+     * framebuffer directly). A probe.txt run sets its own rate. Probe of
+     * build 103: a steady 60, every frame decoded at 15.8 ms average. */
+    if (!stream_profile_probing()) stream_profile_set_fps60(settings->fps60 && settings->wide_video);
     stream_profile_set_weak(settings->net_weak);
     regions_set_choice(settings->server);
     ui_set_theme((UiTheme)settings->theme);

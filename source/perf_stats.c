@@ -8,6 +8,7 @@
 #include "diagnostic.h"
 #include "mvd_video.h"
 #include "report.h"
+#include "stream_profile.h"
 #include <sys/stat.h>
 
 PerfStats g_perf;
@@ -101,6 +102,9 @@ bool perf_end(const char *install_id)
     if (!s) return false;
     json_object_set_new(s, "sl", json_integer(g_perf.slow_loops));
     json_object_set_new(s, "lm", json_integer(g_perf.loop_max_ms));
+    /* 60 fps asked for, and whether it fell back to 30 (experimental). */
+    json_object_set_new(s, "fr", json_integer(stream_profile_fps60_requested() ? 60 : 30));
+    json_object_set_new(s, "fb", json_integer(stream_profile_fps60_blocked() ? 1 : 0));
     const bool ok = json_dump_file(s, REPORT_STATS_PENDING_PATH, JSON_COMPACT) == 0;
     diagnostic_log("REPORT", "session summary %us ping=%d lost=%u repeated=%u saved=%d", n,
                    g_perf.ping_samples ? (int)(g_perf.ping_sum / g_perf.ping_samples) : -1,

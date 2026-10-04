@@ -45,13 +45,25 @@ void stream_profile_set_probing(bool probing) { g_probing = probing; }
 
 void stream_profile_set_sharpen(bool sharpen) { g_sharpen = sharpen; }
 
-static bool g_fps60;
+static bool g_fps60, g_fps60_blocked;
 void stream_profile_set_fps60(bool on) { g_fps60 = on; }
-unsigned stream_profile_fps(void) { return g_fps60 ? 60 : 30; }
+unsigned stream_profile_fps(void) { return g_fps60 && !g_fps60_blocked ? 60 : 30; }
+bool stream_profile_fps60_requested(void) { return g_fps60; }
+void stream_profile_block_fps60(bool blocked) { g_fps60_blocked = blocked; }
+bool stream_profile_fps60_blocked(void) { return g_fps60_blocked; }
+
+/* At 60 fps every bit is decoded twice as often: DOOM Eternal at Sharp
+ * (2-2.5 Mbps) took 15-18 ms a frame of the 16.7 available and lagged
+ * (report EM7YGV). 60 fps keeps to 1-1.5 Mbps whatever Bitrate says. */
+static bool sixty(void) { return stream_profile_fps() >= 60; }
 void stream_profile_set_weak(bool weak) { g_weak = weak; }
 bool stream_profile_weak(void) { return g_weak; }
 bool stream_profile_sharpen(void) { return g_sharpen; }
 bool stream_profile_probing(void) { return g_probing; }
+
+static bool g_probe_decode;
+void stream_profile_set_probe_decode(bool on) { g_probe_decode = on; }
+bool stream_profile_probe_decode(void) { return g_probe_decode; }
 
 static unsigned steady_rate(void)
 {
@@ -76,6 +88,7 @@ static unsigned steady_rate(void)
 unsigned stream_profile_initial_bitrate(void)
 {
     if (g_weak) return 800;
+    if (sixty()) return 1200;
     if (g_bitrate == STREAM_BITRATE_SHARP_TEST) return 2000;
     return g_bitrate == STREAM_BITRATE_ADAPTIVE ? 1400 : steady_rate();
 }
@@ -83,6 +96,7 @@ unsigned stream_profile_initial_bitrate(void)
 unsigned stream_profile_min_bitrate(void)
 {
     if (g_weak) return 600;
+    if (sixty()) return 1000;
     /* NVIDIA parks at the floor without bandwidth feedback (beta.25 tests:
      * a flat ~0.92 Mbps under Adaptive), so the test mode sets a high one. */
     if (g_bitrate == STREAM_BITRATE_SHARP_TEST) return 1800;
@@ -94,6 +108,7 @@ unsigned stream_profile_max_bitrate(void)
     /* Steady peaks stay close to the floor: keyframe bursts above the
      * average are what the 3DS radio loses first. */
     if (g_weak) return 1000;
+    if (sixty()) return 1500;
     if (g_bitrate == STREAM_BITRATE_SHARP_TEST) return 2500;
     return g_bitrate == STREAM_BITRATE_ADAPTIVE ? 1800 : steady_rate() + 250;
 }

@@ -40,6 +40,10 @@ unsigned stream_profile_pacing_delay_us(void);
 void stream_profile_set_override(unsigned width, unsigned height);
 void stream_profile_set_probing(bool probing);
 bool stream_profile_probing(void);
+/* A probe run that decodes and shows the video too (probe.txt "decode" or
+ * "@60"), so decode time is measured; plain probe runs only read the SPS. */
+void stream_profile_set_probe_decode(bool on);
+bool stream_profile_probe_decode(void);
 /* NVIDIA pre-encode filter. Sharpen is the old prefilter (mode 1, level 50);
  * off matches OpenNOW. (Build 62 also tried video.enableIntraRefresh; NVIDIA
  * ignored it and kept an IDR every 10.1 s, so that option was removed.) */
@@ -47,6 +51,11 @@ void stream_profile_set_sharpen(bool sharpen);
 /* Test: ask NVIDIA for 60 frames a second instead of 30 (next launch). */
 void stream_profile_set_fps60(bool on);
 unsigned stream_profile_fps(void);
+/* 60 fps asked for in Settings, and whether this session fell back to 30
+ * because the decoder could not keep up (reset at each launch). */
+bool stream_profile_fps60_requested(void);
+void stream_profile_block_fps60(bool blocked);
+bool stream_profile_fps60_blocked(void);
 /* Weak Wi-Fi / phone hotspot: 0.6-1 Mbps whatever the bitrate setting (fewer
  * packets per frame, so fewer frames hit by a loss), a longer wait for
  * retransmissions and a bigger frame reserve. */
