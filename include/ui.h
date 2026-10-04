@@ -65,6 +65,9 @@ typedef enum {
     UI_IMAGE_NO_COVER,
     /* The lower screen's backdrop tile: dots every 16 px, a cross every 32. */
     UI_IMAGE_GRID,
+    /* Touch camera: the ensō under the finger and its ink trail (white). */
+    UI_IMAGE_LOOK_RING,
+    UI_IMAGE_LOOK_DOT,
     UI_IMAGE_COUNT
 } UiImage;
 
@@ -96,6 +99,8 @@ void ui_begin_top_video(void);
  * so it must be single-buffered. Menus double-buffer it again. */
 void ui_top_classic_video(void);
 void ui_draw_video(void);
+/* The picture's size inside the wide surface (mvd_video_wide_size). */
+void ui_set_video_size(unsigned width, unsigned height);
 /* The picture filter for wide video, done on the GPU while drawing:
  * sharpening 0 (off) ... 3 and colour 0 (natural) ... 2. */
 void ui_set_video_look(unsigned sharpen, unsigned color);
@@ -185,6 +190,9 @@ void ui_surface(UiRect r, u32 border, u32 fill);
 bool ui_backdrop(void);
 /* Frosted glass: the blurred wallpaper behind r (lower screen only). */
 bool ui_glass(UiRect r);
+/* The theme's lower-screen wallpaper, only the part under r (in game,
+ * where the full backdrop is not drawn). */
+bool ui_wallpaper(UiRect r);
 bool ui_hit(UiRect r, int x, int y);
 
 /* PlayStation face symbols, drawn geometrically. */

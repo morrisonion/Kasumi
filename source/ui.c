@@ -106,6 +106,23 @@ bool ui_glass(UiRect r)
     return C2D_DrawImageAt(part, r.x, r.y, 0.0f, NULL, r.w / sub.width, r.h / sub.height);
 }
 
+bool ui_wallpaper(UiRect r)
+{
+    if (!g_backdrop || r.w < 1.0f || r.h < 1.0f) return false;
+    const C2D_Image full = C2D_SpriteSheetGetImage(g_backdrop, 0);
+    const float tw = full.tex->width, th = full.tex->height;
+    const float dv = full.subtex->bottom < full.subtex->top ? -1.0f : 1.0f;
+    Tex3DS_SubTexture sub = *full.subtex;
+    sub.width = (u16)r.w;
+    sub.height = (u16)r.h;
+    sub.left = full.subtex->left + r.x / tw;
+    sub.right = full.subtex->left + (r.x + r.w) / tw;
+    sub.top = full.subtex->top + dv * r.y / th;
+    sub.bottom = full.subtex->top + dv * (r.y + r.h) / th;
+    const C2D_Image part = { full.tex, &sub };
+    return C2D_DrawImageAt(part, r.x, r.y, 0.0f, NULL, 1.0f, 1.0f);
+}
+
 const char *ui_theme_name(UiTheme theme)
 {
     return theme < UI_THEME_COUNT ? THEMES[theme].name : "";
@@ -124,6 +141,9 @@ static bool g_top_wide_linked;
 static C3D_Tex g_video_tex;
 static Tex3DS_SubTexture g_video_subtex;
 static bool g_video_ready;
+/* The picture inside the surface, and where it goes on the 800x480 view. */
+static unsigned g_video_w = VIDEO_WIDTH, g_video_h = VIDEO_HEIGHT;
+static float g_video_x, g_video_y, g_video_scale = 1.0f;
 static C2D_TextBuf g_text;
 static u64 g_started_at;
 static u64 g_last_frame_at;
@@ -148,6 +168,8 @@ GFX_SYMBOLS(sec_system)
 GFX_SYMBOLS(sec_account)
 GFX_SYMBOLS(no_cover)
 GFX_SYMBOLS(grid)
+GFX_SYMBOLS(look_ring)
+GFX_SYMBOLS(look_dot)
 extern const unsigned char _binary_video_shbin_start[];
 extern const unsigned char _binary_video_shbin_end[];
 #define GFX_ENTRY(name) { _binary_##name##_t3x_start, _binary_##name##_t3x_end }
@@ -156,7 +178,8 @@ static const struct { const unsigned char *start, *end; } GFX_DATA[UI_IMAGE_COUN
     GFX_ENTRY(hero), GFX_ENTRY(mist), GFX_ENTRY(enso), GFX_ENTRY(seal), GFX_ENTRY(seal40),
     GFX_ENTRY(seal16), GFX_ENTRY(lantern), GFX_ENTRY(discord),
     GFX_ENTRY(sec_controls), GFX_ENTRY(sec_picture), GFX_ENTRY(sec_sound), GFX_ENTRY(sec_network),
-    GFX_ENTRY(sec_system), GFX_ENTRY(sec_account), GFX_ENTRY(no_cover), GFX_ENTRY(grid)
+    GFX_ENTRY(sec_system), GFX_ENTRY(sec_account), GFX_ENTRY(no_cover), GFX_ENTRY(grid),
+    GFX_ENTRY(look_ring), GFX_ENTRY(look_dot)
 };
 static C2D_SpriteSheet g_sheets[UI_IMAGE_COUNT];
 
@@ -291,13 +314,15 @@ static void draw_video_look(void)
                GPU_PRIMARY_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_ADD_SIGNED, 0);
     C3D_TexEnvBufUpdate(C3D_RGB, BIT(2));
 
-    const float u1 = (float)VIDEO_WIDTH / MVD_TEX_WIDTH;
-    const float v1 = 1.0f - (float)VIDEO_HEIGHT / MVD_TEX_HEIGHT;
+    const float u1 = (float)g_video_w / MVD_TEX_WIDTH;
+    const float v1 = 1.0f - (float)g_video_h / MVD_TEX_HEIGHT;
+    const float x0 = g_video_x, x1 = g_video_x + (float)g_video_w * g_video_scale;
+    const float y0 = g_video_y / 2.0f, y1 = (g_video_y + (float)g_video_h * g_video_scale) / 2.0f;
     C3D_ImmDrawBegin(GPU_TRIANGLE_STRIP);
-    look_vertex(0.0f, 0.0f, 0.0f, 1.0f);
-    look_vertex(0.0f, 240.0f, 0.0f, v1);
-    look_vertex(800.0f, 0.0f, u1, 1.0f);
-    look_vertex(800.0f, 240.0f, u1, v1);
+    look_vertex(x0, y0, 0.0f, 1.0f);
+    look_vertex(x0, y1, 0.0f, v1);
+    look_vertex(x1, y0, u1, 1.0f);
+    look_vertex(x1, y1, u1, v1);
     C3D_ImmDrawEnd();
 
     /* Hand the GPU back to citro2d as it expects it. */
@@ -481,13 +506,33 @@ void ui_begin_top_video(void)
 {
     g_on_bottom = false;
     link_top(true);
-    C2D_TargetClear(g_top_wide, UI_BG);
+    /* Black: a picture narrower than the screen leaves bars. */
+    C2D_TargetClear(g_top_wide, C2D_Color32(0x00, 0x00, 0x00, 0xFF));
     C2D_SceneBegin(g_top_wide);
     /* citro2d reuses its cached 400-wide top-screen projection for 800-wide
      * targets too (a framebuffer readback showed everything drawn at twice
      * the width), so halve x to address all 800 columns. */
     C2D_ViewReset();
     C2D_ViewScale(0.5f, 1.0f);
+}
+
+void ui_set_video_size(unsigned width, unsigned height)
+{
+    if (!width || !height || width > VIDEO_WIDTH || height > VIDEO_HEIGHT) width = VIDEO_WIDTH, height = VIDEO_HEIGHT;
+    if (width == g_video_w && height == g_video_h) return;
+    g_video_w = width;
+    g_video_h = height;
+    g_video_subtex.width = (u16)width;
+    g_video_subtex.height = (u16)height;
+    g_video_subtex.right = (float)width / MVD_TEX_WIDTH;
+    g_video_subtex.bottom = 1.0f - (float)height / MVD_TEX_HEIGHT;
+    /* As large as fits in 800x480, centred, shape kept. */
+    float scale = (float)VIDEO_WIDTH / (float)width;
+    const float by_height = (float)VIDEO_HEIGHT / (float)height;
+    if (by_height < scale) scale = by_height;
+    g_video_scale = scale;
+    g_video_x = floorf(((float)VIDEO_WIDTH - (float)width * scale) / 2.0f);
+    g_video_y = floorf(((float)VIDEO_HEIGHT - (float)height * scale) / 2.0f);
 }
 
 void ui_draw_video(void)
@@ -499,7 +544,7 @@ void ui_draw_video(void)
     }
     const C2D_Image image = { &g_video_tex, &g_video_subtex };
     /* Full width, half height: 800x480 -> 800x240 with a 2:1 row average. */
-    C2D_DrawImageAt(image, 0.0f, 0.0f, 0.0f, NULL, 1.0f, 0.5f);
+    C2D_DrawImageAt(image, g_video_x, g_video_y / 2.0f, 0.0f, NULL, g_video_scale, 0.5f * g_video_scale);
 }
 
 void ui_begin_bottom(void)
@@ -655,7 +700,13 @@ float ui_text_width(const char *text, float size)
     while (*p && *p != '\n') {
         u32 code = 0;
         const ssize_t units = decode_utf8(&code, p);
-        if (units <= 0) break;
+        /* Not UTF-8: citro2d draws a box there, so measure one and go on.
+         * Stopping here made a long message "fit" on one line. */
+        if (units <= 0) {
+            width += glyph_advance('?');
+            ++p;
+            continue;
+        }
         width += glyph_advance(code);
         p += units;
     }

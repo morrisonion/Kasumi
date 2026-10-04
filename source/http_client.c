@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "diagnostic.h"
 
@@ -212,4 +213,15 @@ char *http_url_encode(const char *value)
     curl_free(escaped);
     curl_easy_cleanup(curl);
     return copy;
+}
+
+bool http_clock_wrong(char *date, size_t size)
+{
+    /* 2026-09-01 and ten years on: no certificate checks out outside that. */
+    const time_t now = time(NULL), earliest = 1788220800, latest = earliest + 10 * 365 * 24 * 3600;
+    if (date && size) {
+        const struct tm *t = gmtime(&now);
+        if (!t || !strftime(date, size, "%Y-%m-%d", t)) snprintf(date, size, "?");
+    }
+    return now < earliest || now > latest;
 }

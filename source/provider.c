@@ -3,6 +3,7 @@
 #include <3ds.h>
 #include <jansson.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <string.h>
 #include <strings.h>
 
@@ -20,6 +21,18 @@ static char g_recommended[12];
 /* From the provider list: the country NVIDIA sees, and whether the
  * recommendation is ours because NVIDIA names none (partner only). */
 static char g_country[4];
+
+/* NVIDIA's two-letter country code, upper case; anything else is dropped
+ * (a launch error showed three unreadable boxes where the country goes). */
+static void country_code(char out[4], const char *value)
+{
+    out[0] = '\0';
+    if (!value || strlen(value) != 2 || !isalpha((unsigned char)value[0]) || !isalpha((unsigned char)value[1]))
+        return;
+    out[0] = (char)toupper((unsigned char)value[0]);
+    out[1] = (char)toupper((unsigned char)value[1]);
+    out[2] = '\0';
+}
 static bool g_partner_only;
 static GfnProvider g_active;
 static bool g_active_set;
@@ -130,7 +143,7 @@ void providers_load(void)
     const char *recommended = json_is_object(root) ? json_string_value(json_object_get(root, "recommended")) : NULL;
     snprintf(g_recommended, sizeof(g_recommended), "%s", recommended ? recommended : "");
     const char *country = json_is_object(root) ? json_string_value(json_object_get(root, "country")) : NULL;
-    snprintf(g_country, sizeof(g_country), "%s", country ? country : "");
+    country_code(g_country, country);
     g_partner_only = json_is_object(root) && json_is_true(json_object_get(root, "partner_only"));
     json_decref(root);
 }
@@ -201,7 +214,7 @@ bool providers_fetch(void)
     memcpy(g_list, fresh, sizeof(GfnProvider) * count);
     g_count = count;
     snprintf(g_recommended, sizeof(g_recommended), "%s", recommended);
-    snprintf(g_country, sizeof(g_country), "%.3s", country ? country : "");
+    country_code(g_country, country);
     g_partner_only = only;
     LightLock_Unlock(&g_lock);
     save();
@@ -273,7 +286,10 @@ const char *providers_country_name(const char *code)
     };
     for (size_t i = 0; code && i < sizeof(names) / sizeof(names[0]); ++i)
         if (!strcasecmp(code, names[i].code)) return names[i].name;
-    return code && code[0] ? code : "this country";
+    /* A code we have no name for reads as itself ("EG"); anything that is
+     * not two letters is not shown at all. */
+    return code && strlen(code) == 2 && isalpha((unsigned char)code[0]) && isalpha((unsigned char)code[1])
+        ? code : "your country";
 }
 
 bool providers_partner_here(GfnProvider *partner, bool *only)

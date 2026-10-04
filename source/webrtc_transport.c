@@ -244,7 +244,7 @@ static char *build_nvst(const char *answer)
         "a=packetPacing.numGroups:%u\na=packetPacing.minNumPacketsPerGroup:4\n"
         "a=packetPacing.minNumPacketsFrame:4\na=packetPacing.maxDelayUs:%u\n"
         "a=video.mapRtpTimestampsToFrames:1\na=video.clientViewportWd:%u\n"
-        "a=video.clientViewportHt:%u\na=video.maxFPS:30\na=video.maxNumReferenceFrames:4\n"
+        "a=video.clientViewportHt:%u\na=video.maxFPS:%u\na=video.maxNumReferenceFrames:4\n"
         /* The peak and limit attributes stay: beta.25 tried the web client's
          * set without them, the rate did not rise, and NVIDIA then ignored the
          * cap (Weak's 1 Mbps ran at ~1.3 on the wire, with ~3 resends/s). */
@@ -263,7 +263,7 @@ static char *build_nvst(const char *answer)
         "a=ri.enablePartiallyReliableTransferHid:4294967295\n",
         pwd, ufrag, fingerprint, stream_profile_dynamic_mode(),
         stream_profile_pacing_groups(), stream_profile_pacing_delay_us(),
-        stream_profile_width(), stream_profile_height(),
+        stream_profile_width(), stream_profile_height(), stream_profile_fps(),
         stream_profile_initial_bitrate(), stream_profile_max_bitrate(),
         stream_profile_max_bitrate(), stream_profile_min_bitrate(),
         stream_profile_max_bitrate(), stream_profile_max_bitrate(),
@@ -914,7 +914,7 @@ static void transport_tick(WebRtcTransport *t, NvstSignal *signal)
     if (!t->input_ready) return;
     if (now_input - t->last_input_heartbeat_at >= 2000) {
         char heartbeat[4] = {2, 0, 0, 0};
-        peer_connection_datachannel_send_binary_sid(pc, heartbeat, sizeof(heartbeat), 0);
+        peer_connection_datachannel_send_binary_lossy_sid(pc, heartbeat, sizeof(heartbeat), 0);
         t->last_input_heartbeat_at = now_input;
     }
     /* Optional partially reliable gamepad channel (Settings > Fast input). */
@@ -981,7 +981,10 @@ static void transport_tick(WebRtcTransport *t, NvstSignal *signal)
         size = gfn_input_encode_gamepad_wire(packet, &state, timestamp_us,
                                              t->input_protocol_version);
     }
-    if (peer_connection_datachannel_send_binary_sid(pc, (char *)packet, size, sid) >= 0)
+    /* A full controller state: if it is lost, the next one (16 ms later)
+     * says the same, so it is skipped rather than resent. Mouse clicks and
+     * keys stay reliable. */
+    if (peer_connection_datachannel_send_binary_lossy_sid(pc, (char *)packet, size, sid) >= 0)
         t->input_reports++;
     /* Buttons and triggers as they change; stick positions only every 10 s.
      * Build 97 logged sticks every 200 ms: most of a session's log was

@@ -36,6 +36,8 @@ typedef struct {
     /* Picture, applied at the next launch. */
     bool wide_video;
     StreamBitrateMode bitrate_mode;
+    /* Test: 60 frames a second (the LCD's own rate) instead of 30. */
+    bool fps60;
     /* NVIDIA encoder options, applied at the next launch. */
     bool sharpen;
     /* Kasumi's own picture filter on the GPU (Wide mode, live):
@@ -47,6 +49,14 @@ typedef struct {
     /* C-Stick speed and inversion (GfnInputConfig). */
     unsigned camera_speed;
     unsigned camera_invert;
+    /* Turn the camera on the lower screen: 0 off, 1 trackpad, 2 stick. On,
+     * a C-STICK button by PS swaps the stats for the pad; whether the pad was
+     * showing is kept for the next game. */
+    unsigned touch_camera;
+    bool touch_camera_shown;
+    /* How far the touch C-stick pushes for full speed: 0 small, 1 medium,
+     * 2 large. */
+    unsigned touch_stick_size;
     /* Appearance and audio. */
     unsigned theme;
     /* Stream volume in steps of 20 %: 0 = mute ... 5 = 100 %. */

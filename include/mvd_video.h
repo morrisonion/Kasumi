@@ -12,6 +12,9 @@
 bool mvd_video_init(unsigned input_width, unsigned input_height);
 /* True while decoding for the 800-column wide screen via the GPU. */
 bool mvd_video_wide(void);
+/* The picture inside the wide surface: 800x480, or smaller for a stream
+ * narrower than 5:3 (drawn centred with bars). */
+void mvd_video_wide_size(unsigned *width, unsigned *height);
 /* The oldest ready wide frame's 1024x512 linear surface; NULL if none. The
  * decoder won't overwrite it until mvd_video_release_gpu_frame(). */
 const void *mvd_video_take_gpu_frame(void);

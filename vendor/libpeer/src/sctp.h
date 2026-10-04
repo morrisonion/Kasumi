@@ -34,6 +34,7 @@ typedef struct SctpChunkParam {
 typedef enum SctpParamType {
 
   SCTP_PARAM_STATE_COOKIE = 7,
+  SCTP_PARAM_FORWARD_TSN_SUPPORTED = 0xC000,
 
 } SctpParamType;
 
@@ -207,6 +208,9 @@ int sctp_get_rtt_ms(Sctp* sctp);
 void sctp_incoming_data(Sctp* sctp, char* buf, size_t len);
 
 int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid);
+/* The same, for a message the next one replaces (a controller state): it
+ * is skipped rather than resent if lost, when the peer allows that. */
+int sctp_outgoing_data_lossy(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid);
 
 void sctp_add_stream_mapping(Sctp* sctp, const char* label, uint16_t sid);
 

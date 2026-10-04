@@ -520,6 +520,14 @@ int peer_connection_datachannel_send_binary_sid(PeerConnection* pc, char* messag
   return sctp_outgoing_data(&pc->sctp, message, len, PPID_BINARY, sid);
 }
 
+int peer_connection_datachannel_send_binary_lossy_sid(PeerConnection* pc, char* message, size_t len, uint16_t sid) {
+  if (!sctp_is_connected(&pc->sctp)) {
+    LOGE("sctp not connected");
+    return -1;
+  }
+  return sctp_outgoing_data_lossy(&pc->sctp, message, len, PPID_BINARY, sid);
+}
+
 int peer_connection_create_datachannel(PeerConnection* pc, DecpChannelType channel_type, uint16_t priority, uint32_t reliability_parameter, char* label, char* protocol) {
   return peer_connection_create_datachannel_sid(pc, channel_type, priority, reliability_parameter, label, protocol, 0);
 }

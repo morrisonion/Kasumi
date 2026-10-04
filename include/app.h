@@ -67,6 +67,8 @@ typedef enum {
     ACTION_STREAM_POINTER,
     ACTION_STREAM_ZOOM,
     ACTION_STREAM_MENU,
+    /* The C-STICK button by PS, or HIDE on the pad: show or hide the pad. */
+    ACTION_LOOK_TOGGLE,
     /* Same order as the stream menu items (index -> action). */
     ACTION_MENU_RESUME,
     ACTION_MENU_SCREENSHOT,
@@ -117,14 +119,15 @@ enum { SETTING_LAYOUT, SETTING_TRIGGERS, SETTING_DEADZONE, SETTING_POINTER,
        SETTING_UPDATES, SETTING_AUTO_UPDATE, SETTING_UPDATE_CHANNEL,
        SETTING_PROVIDER, SETTING_ACCOUNT, SETTING_COMMUNITY, SETTING_MUSIC, SETTING_VOICE, SETTING_SFX,
        SETTING_CAMERA_SPEED, SETTING_CAMERA_INVERT, SETTING_SCREENSHOTS,
-       SETTING_VIDEO_SHARPEN, SETTING_VIDEO_COLOR, SETTING_COUNT };
+       SETTING_VIDEO_SHARPEN, SETTING_VIDEO_COLOR, SETTING_TOUCH_CAMERA, SETTING_TOUCH_STICK_SIZE,
+       SETTING_FRAME_RATE, SETTING_COUNT };
 
 /* Library tabs (L / R). */
 enum { LIBRARY_TAB_ALL, LIBRARY_TAB_FAVOURITES, LIBRARY_TAB_RECENT, LIBRARY_TAB_COUNT };
 
 /* Per-game options sheet rows. */
-enum { OPTION_BITRATE, OPTION_CAMERA_SPEED, OPTION_CAMERA_INVERT, OPTION_GYRO, OPTION_GYRO_SPEED, OPTION_LAYOUT,
-       OPTION_MAPPING, OPTION_CONNECTION, OPTION_COUNT };
+enum { OPTION_BITRATE, OPTION_CAMERA_SPEED, OPTION_CAMERA_INVERT, OPTION_TOUCH_CAMERA, OPTION_GYRO,
+       OPTION_GYRO_SPEED, OPTION_LAYOUT, OPTION_MAPPING, OPTION_CONNECTION, OPTION_COUNT };
 
 #define GUIDE_PAGES 5
 
@@ -222,6 +225,8 @@ typedef struct {
     bool limit_unclosable;
     /* The wait is NVIDIA's rate limit (429), not a busy slot. */
     bool limit_rate;
+    /* The wait is for NVIDIA's limited mode (busy), not a session slot. */
+    bool limit_busy;
     /* Weak / hotspot switched on for this session because the last one on
      * this network was choppy. */
     bool auto_weak;
@@ -247,6 +252,25 @@ typedef struct {
 
     bool touching;
     int touch_x, touch_y;
+    /* Touch camera, driven by main.c and drawn by screens.c. look_mode is
+     * 0 while the layout is not showing, else 1 trackpad or 2 stick. */
+    unsigned look_mode;
+    /* The touch camera is on for this game, pad showing or not (C-STICK). */
+    bool look_available;
+    bool look_active;
+    int look_anchor_x, look_anchor_y;
+    /* The finger as the pad last saw it (kept through a dropped touch). */
+    int look_x, look_y;
+    /* The touch C-stick's rim: full push this far from its centre (px). */
+    float look_radius;
+    float look_amount;
+    u64 look_released_at;
+    int look_release_x, look_release_y;
+    int look_trail_x[10], look_trail_y[10];
+    u64 look_trail_at[10];
+    unsigned look_trail_head;
+    /* R3 held by a double tap on the pad (drawn lit). */
+    bool look_r3;
 
     /* A network job is running on the worker; shown as a non-blocking overlay. */
     const char *busy;
@@ -287,6 +311,10 @@ AppAction screens_touch(const App *app, int x, int y);
 uint16_t screens_stream_held_buttons(const App *app, int x, int y);
 /* Stream view: the centre panel (touchpad or zoom map). */
 UiRect screens_stream_panel(void);
+/* The touch camera's pad and its R3 corner, while look_mode is on. */
+UiRect screens_look_pad(void);
+UiRect screens_look_r3(void);
+UiRect screens_look_hide(void);
 /* Settings helpers shared by input handling and drawing. The settings list
  * is grouped into sections; positions map to SETTING_* ids. */
 int screens_setting_at(int position);

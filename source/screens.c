@@ -10,6 +10,7 @@
 #include "game_prefs.h"
 #include "shortcut.h"
 #include "gallery.h"
+#include "http_client.h"
 #include "menu_audio.h"
 #include "updater.h"
 #include "mvd_video.h"
@@ -84,7 +85,7 @@ static const UiRect DET_SHORTCUT = { 16, 158, 288, 24 };
 static const UiRect DET_BACK = { 212, 188, 92, 44 };
 static const UiRect OPT_CLOSE = { 246, 3, 64, 30 };
 #define OPT_ROW_Y 39.0f
-#define OPT_ROW_H 22.0f
+#define OPT_ROW_H 19.5f
 
 /* Button mapping editor, lower screen. */
 static const UiRect MAP_PREV = { 16, 96, 48, 48 };
@@ -198,12 +199,17 @@ static const SettingEntry SETTING_ENTRIES[] = {
     { SETTING_DEADZONE, NULL, NULL },
     { SETTING_CAMERA_SPEED, NULL, NULL },
     { SETTING_CAMERA_INVERT, NULL, NULL },
+    { SETTING_TOUCH_CAMERA, NULL, NULL },
+    { SETTING_TOUCH_STICK_SIZE, NULL, NULL },
     { SETTING_GYRO, NULL, NULL },
     { SETTING_GYRO_SPEED, NULL, NULL },
     { SETTING_POINTER, NULL, NULL },
     { SETTING_FAST_INPUT, NULL, NULL },
     { -1, "画質", "PICTURE" },
     { SETTING_RESOLUTION, NULL, NULL },
+    /* SETTING_FRAME_RATE stays hidden: at 60 fps the decoder averaged
+     * 15 ms of a 16.7 ms frame and NVIDIA flipped between 30 and 60
+     * (test report Z44BDW), so it hitched. Next try: 800x480. */
     { SETTING_BITRATE, NULL, NULL },
     { SETTING_VIDEO_SHARPEN, NULL, NULL },
     { SETTING_VIDEO_COLOR, NULL, NULL },
@@ -311,6 +317,8 @@ static const char *const SETTING_LABELS[SETTING_COUNT] = {
     [SETTING_RESOLUTION] = "Screen mode", [SETTING_BITRATE] = "Bitrate",
     [SETTING_FILTER] = "Server sharpening", [SETTING_GYRO] = "Gyro aim",
     [SETTING_VIDEO_SHARPEN] = "Sharpness", [SETTING_VIDEO_COLOR] = "Colour",
+    [SETTING_TOUCH_CAMERA] = "Touch camera", [SETTING_TOUCH_STICK_SIZE] = "Touch C-stick size",
+    [SETTING_FRAME_RATE] = "Frame rate",
     [SETTING_GYRO_SPEED] = "Gyro speed", [SETTING_ACCOUNT] = "NVIDIA account",
     [SETTING_CAMERA_SPEED] = "Camera stick speed", [SETTING_CAMERA_INVERT] = "Invert camera",
     [SETTING_THEME] = "Theme", [SETTING_VOLUME] = "Stream volume",
@@ -330,6 +338,8 @@ static const char *const SETTING_JP[SETTING_COUNT] = {
     [SETTING_RESOLUTION] = "表示", [SETTING_BITRATE] = "ビットレート",
     [SETTING_FILTER] = "鋭化", [SETTING_GYRO] = "ジャイロ",
     [SETTING_VIDEO_SHARPEN] = "鮮明", [SETTING_VIDEO_COLOR] = "色彩",
+    [SETTING_TOUCH_CAMERA] = "タッチ視点", [SETTING_TOUCH_STICK_SIZE] = "大きさ",
+    [SETTING_FRAME_RATE] = "フレーム",
     [SETTING_GYRO_SPEED] = "感度", [SETTING_ACCOUNT] = "アカウント",
     [SETTING_CAMERA_SPEED] = "カメラ速度", [SETTING_CAMERA_INVERT] = "カメラ反転",
     [SETTING_THEME] = "色", [SETTING_VOLUME] = "音量",
@@ -424,6 +434,9 @@ static unsigned setting_option(const App *app, int setting, unsigned *count)
     case SETTING_GYRO_SPEED: *count = 3; return s->gyro_speed;
     case SETTING_CAMERA_SPEED: *count = 4; return s->camera_speed;
     case SETTING_CAMERA_INVERT: *count = 3; return s->camera_invert;
+    case SETTING_TOUCH_CAMERA: *count = 3; return s->touch_camera;
+    case SETTING_TOUCH_STICK_SIZE: *count = 3; return s->touch_stick_size;
+    case SETTING_FRAME_RATE: *count = 2; return s->fps60 ? 1 : 0;
     case SETTING_THEME: *count = UI_THEME_COUNT; return s->theme;
     case SETTING_VOLUME: *count = 6; return s->volume;
     case SETTING_MENU_AUDIO: *count = 2; return s->mute_in_menus ? 1 : 0;
@@ -474,6 +487,10 @@ static const char *setting_value(const App *app, int setting)
     case SETTING_CAMERA_SPEED:
         return s->camera_speed == 0 ? "Slow" : s->camera_speed == 2 ? "Fast" : s->camera_speed == 3 ? "Fastest" : "Normal";
     case SETTING_CAMERA_INVERT: return s->camera_invert == 1 ? "Up-down" : s->camera_invert == 2 ? "Both" : "Off";
+    case SETTING_TOUCH_CAMERA: return s->touch_camera == 1 ? "Stick" : s->touch_camera == 2 ? "Trackpad" : "Off";
+    case SETTING_TOUCH_STICK_SIZE:
+        return s->touch_stick_size == 0 ? "Small" : s->touch_stick_size == 2 ? "Large" : "Medium";
+    case SETTING_FRAME_RATE: return s->fps60 ? "60 fps (test)" : "30 fps";
     case SETTING_THEME: return ui_theme_name((UiTheme)s->theme);
     case SETTING_VOLUME: {
         static const char *const levels[6] = { "Muted", "20 %", "40 %", "60 %", "80 %", "100 %" };
@@ -585,6 +602,20 @@ static const char *setting_description(const App *app, int setting)
             : s->bitrate_mode == STREAM_BITRATE_STEADY_1000
             ? "About 1 Mbps: smoothest on weak Wi-Fi or a phone hotspot, a little softer. Next launch."
             : "A fixed rate. If the stats show RESENT/S climbing, pick a lower one. Next launch.";
+    case SETTING_FRAME_RATE:
+        return s->fps60
+            ? "Test: twice the frames for smoother motion, but each frame gets half the data, so it's softer. Some frames may be dropped. Next launch."
+            : "30 frames a second: the tested setting, with the most detail per frame. Next launch.";
+    case SETTING_TOUCH_STICK_SIZE:
+        return s->touch_stick_size == 0 ? "A short push turns at full speed: quick, for small thumbs or fast games."
+             : s->touch_stick_size == 2 ? "A long push for full speed: finer control when aiming slowly."
+                                        : "How far you push the touch C-stick for full speed. Medium suits most games.";
+    case SETTING_TOUCH_CAMERA:
+        return s->touch_camera == 0
+            ? "No C-STICK button in games: the lower screen keeps its stats and buttons."
+            : s->touch_camera == 1
+            ? "In a game, tap C-STICK by PS. Touch and push, like the C-Stick: hold it out to keep turning. Double-tap for R3."
+            : "In a game, tap C-STICK by PS, then drag to turn the camera; it stops when your finger does. Double-tap for R3.";
     case SETTING_VIDEO_SHARPEN:
         if (!s->wide_video) return "Needs Screen mode: Wide 800. Sharpens edges and text on the console, at no cost to the stream.";
         return s->video_sharpen == 0 ? "The picture exactly as it arrives."
@@ -736,6 +767,9 @@ void screens_setting_change(App *app, int setting, int direction)
     case SETTING_GYRO_SPEED: s->gyro_speed = (s->gyro_speed + 3 + step) % 3; break;
     case SETTING_CAMERA_SPEED: s->camera_speed = (s->camera_speed + 4 + step) % 4; break;
     case SETTING_CAMERA_INVERT: s->camera_invert = (s->camera_invert + 3 + step) % 3; break;
+    case SETTING_TOUCH_CAMERA: s->touch_camera = (s->touch_camera + 3 + step) % 3; break;
+    case SETTING_TOUCH_STICK_SIZE: s->touch_stick_size = (s->touch_stick_size + 3 + step) % 3; break;
+    case SETTING_FRAME_RATE: s->fps60 = !s->fps60; break;
     case SETTING_THEME: s->theme = (s->theme + UI_THEME_COUNT + step) % UI_THEME_COUNT; break;
     case SETTING_VOLUME: s->volume = (s->volume + 6 + step) % 6; break;
     case SETTING_MENU_AUDIO: s->mute_in_menus = !s->mute_in_menus; break;
@@ -1075,11 +1109,17 @@ static void draw_library_top(const App *app, bool entering)
         const bool favourite = game_prefs_favourite(game->app_id);
         if (favourite) ui_rounded(42, y + 9, 5, 5, 2.5f, UI_ACCENT);
         const float title_x = favourite ? 51.0f : 44.0f;
-        const char *store = store_label(game->store);
+        /* In search, a game the account doesn't have says so instead of its
+         * store (they were a common "can't play this game"). */
+        unsigned library_games = 0;
+        const bool missing = searching && gfn_library_known(&library_games) && library_games &&
+                             !gfn_in_library(game);
+        const char *store = missing ? "NOT IN LIBRARY" : store_label(game->store);
         const float store_w = ui_text_width(store, 11) + 12;
         ui_text_fit(title_x, y + 5, 13, selected ? UI_TEXT : UI_TEXT_DIM, UI_ALIGN_LEFT,
                     LIB_LIST_W - title_x - store_w - 4, game->title);
-        ui_pill(10 + LIB_LIST_W, y + 4, selected ? UI_TEXT_DIM : UI_LINE_STRONG, UI_ALIGN_RIGHT, store);
+        ui_pill(10 + LIB_LIST_W, y + 4, missing ? UI_KIN : selected ? UI_TEXT_DIM : UI_LINE_STRONG,
+                UI_ALIGN_RIGHT, store);
     }
 
     /* Scroll rail. */
@@ -1656,6 +1696,7 @@ static const char *option_value(const App *app, const GamePrefs *prefs, int row,
     static const char *const speeds[4] = { "Slow", "Normal", "Fast", "Fastest" };
     static const char *const inverts[3] = { "Off", "Up-down", "Both" };
     static const char *const gyro_speeds[3] = { "Low", "Medium", "High" };
+    static const char *const touches[3] = { "Off", "Stick", "Trackpad" };
     const AppSettings *s = &app->settings;
     const GfnClient *c = app->client;
     /* This game's value, or "Default (what Settings says)", so a game's
@@ -1667,6 +1708,7 @@ static const char *option_value(const App *app, const GamePrefs *prefs, int row,
     case OPTION_BITRATE: names = bitrates; own = prefs->bitrate; global = s->bitrate_mode; count = STREAM_BITRATE_COUNT; break;
     case OPTION_CAMERA_SPEED: names = speeds; own = prefs->camera_speed; global = s->camera_speed; count = 4; break;
     case OPTION_CAMERA_INVERT: names = inverts; own = prefs->camera_invert; global = s->camera_invert; count = 3; break;
+    case OPTION_TOUCH_CAMERA: names = touches; own = prefs->touch_camera; global = s->touch_camera; count = 3; break;
     case OPTION_GYRO: names = gyros; own = prefs->gyro; global = s->gyro_mode; count = GFN_GYRO_MODE_COUNT; break;
     case OPTION_GYRO_SPEED: names = gyro_speeds; own = prefs->gyro_speed; global = s->gyro_speed; count = 3; break;
     case OPTION_LAYOUT: names = layouts; own = prefs->layout; global = s->button_layout; count = 2; break;
@@ -1690,6 +1732,7 @@ static bool option_custom(const GamePrefs *prefs, int row)
     case OPTION_BITRATE: return prefs->bitrate >= 0;
     case OPTION_CAMERA_SPEED: return prefs->camera_speed >= 0;
     case OPTION_CAMERA_INVERT: return prefs->camera_invert >= 0;
+    case OPTION_TOUCH_CAMERA: return prefs->touch_camera >= 0;
     case OPTION_GYRO: return prefs->gyro >= 0;
     case OPTION_GYRO_SPEED: return prefs->gyro_speed >= 0;
     case OPTION_LAYOUT: return prefs->layout >= 0;
@@ -1733,12 +1776,13 @@ static void draw_options_sheet(const App *app, float p)
     ui_button(OPT_CLOSE, "DONE", "完了", UI_BUTTON_NORMAL, pressed(app, OPT_CLOSE));
     ui_hline(16, 36, 288, UI_LINE);
     static const char *const labels[OPTION_COUNT] = {
-        "Bitrate", "Camera stick speed", "Invert camera", "Gyro aim", "Gyro speed", "Button layout",
+        "Bitrate", "Camera stick speed", "Invert camera", "Touch camera", "Gyro aim", "Gyro speed", "Button layout",
         "Button mapping", "Connection" };
     static const char *const help[OPTION_COUNT] = {
         "Picture detail for this game. Default follows Settings.",
         "How fast the C-Stick turns the camera in this game.",
         "Reverse the C-Stick in this game. Gyro is not inverted.",
+        "Turn the camera on the lower screen in this game.",
         "Aim by turning the console, in this game only.",
         "How fast turning the console moves the camera here.",
         "3DS A sends the pad's bottom button, or the one printed A.",
@@ -2198,8 +2242,17 @@ static void draw_welcome_bottom(const App *app)
 {
     draw_status_strip(app, app->status);
     ui_text(160, 40, 12, UI_TEXT, UI_ALIGN_CENTER, "Your GeForce NOW games on the New 3DS.");
-    ui_text(160, 58, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, "Sign-in happens on your phone or computer:");
-    ui_text(160, 73, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, "no password is typed on this console.");
+    char date[16];
+    if (http_clock_wrong(date, sizeof(date))) {
+        /* Sign-in would fail with no code shown: say why first. */
+        char text[160];
+        snprintf(text, sizeof(text), "Your 3DS clock says %s. Set the date and time in System Settings "
+                 "first, or NVIDIA's sign-in fails.", date);
+        ui_text_wrap(160, 58, 11, UI_KIN, UI_ALIGN_CENTER, 292, 2, 14, text);
+    } else {
+        ui_text(160, 58, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, "Sign-in happens on your phone or computer:");
+        ui_text(160, 73, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, "no password is typed on this console.");
+    }
     ui_button(WEL_SIGN_IN, "SIGN IN", "サインイン", UI_BUTTON_PRIMARY, pressed(app, WEL_SIGN_IN));
     ui_button(WEL_SETTINGS, "SETTINGS", "設定", UI_BUTTON_NORMAL, pressed(app, WEL_SETTINGS));
     ui_button(WEL_EXIT, "EXIT", "終了", UI_BUTTON_NORMAL, pressed(app, WEL_EXIT));
@@ -2707,17 +2760,161 @@ static void draw_stream_header(const App *app)
 }
 
 static void draw_welcome_back(const App *app);
+static void draw_stick_button(UiRect r, const char *label, const char *jp, bool is_pressed);
 
-static void draw_stream_bottom(const App *app, float overlay_p)
+/* ---- Touch camera ----------------------------------------------------------- */
+
+/* The layout while it is on: L3 and PS on the left, one line of stats on
+ * top, and the rest is the pad, with an R3 corner. */
+static const UiRect LOOK_L3 = { 6, 30, 56, 112 };
+static const UiRect LOOK_PS = { 6, 146, 56, 42 };
+static const UiRect LOOK_STATS = { 68, 30, 246, 18 };
+static const UiRect LOOK_PAD = { 68, 52, 246, 136 };
+static const UiRect LOOK_R3 = { 262, 162, 48, 22 };
+/* HIDE in the pad's top corner, C-STICK on the rule right of PS. */
+static const UiRect LOOK_HIDE = { 262, 56, 48, 20 };
+static const UiRect STR_LOOK = { 194, 156, 58, 22 };
+#define LOOK_TRAIL_MS 320.0f
+#define LOOK_RELEASE_MS 260.0f
+
+UiRect screens_look_pad(void) { return LOOK_PAD; }
+UiRect screens_look_r3(void) { return LOOK_R3; }
+UiRect screens_look_hide(void) { return LOOK_HIDE; }
+
+/* A small square key with one word, lit while active. */
+static void look_chip(UiRect r, const char *label, bool lit, bool down)
+{
+    ui_rect_r(r, down || lit ? UI_ACCENT : ui_with_alpha(UI_BG, 0xC0));
+    ui_outline(r.x, r.y, r.w, r.h, 1.0f, down || lit ? UI_ACCENT : UI_LINE_STRONG);
+    ui_label(r.x + r.w / 2, r.y + (r.h - 11) / 2, 11, down || lit ? UI_BG : UI_TEXT, UI_ALIGN_CENTER, label);
+}
+
+static void draw_look_stats(const App *app)
 {
     const WebRtcTransport *t = app->transport;
-    if (app->keyboard_open) {
-        remote_keyboard_draw(t, app->touching, app->touch_x, app->touch_y);
+    const UiRect r = LOOK_STATS;
+    ui_rect_r(r, UI_SURFACE);
+    ui_outline(r.x, r.y, r.w, r.h, 1.0f, UI_LINE);
+    if (!app->settings.show_stats) {
+        ui_text_fit(r.x + r.w / 2, r.y + 2, 11, UI_TEXT_DIM, UI_ALIGN_CENTER, r.w - 12, app->game_title);
         return;
     }
-    draw_stream_header(app);
+    /* Four readings across, amber when one is a problem. */
+    char values[4][16];
+    snprintf(values[0], sizeof(values[0]), "%u FPS", app->fps);
+    snprintf(values[1], sizeof(values[1]), "%.1f MBPS", t->video_kbps / 1000.0f);
+    snprintf(values[2], sizeof(values[2]), "%d MS", t->rtt_ms);
+    snprintf(values[3], sizeof(values[3]), "%u RESENT", app->resent_per_second);
+    const bool warn[4] = { app->fps > 0 && app->fps < 24, false, t->rtt_ms > 80, app->resent_per_second > 2 };
+    const float cell = r.w / 4;
+    for (int i = 0; i < 4; ++i) {
+        ui_label(r.x + cell * i + cell / 2, r.y + 3, 11, warn[i] ? UI_KIN : UI_TEXT_DIM, UI_ALIGN_CENTER, values[i]);
+        if (i) ui_vline(r.x + cell * i, r.y + 4, r.h - 8, UI_LINE);
+    }
+}
 
-    const uint16_t held = app->touching ? screens_stream_held_buttons(app, app->touch_x, app->touch_y) : 0;
+/* Small L marks in the pad's corners, like the buttons'. */
+static void look_corners(UiRect r, u32 color)
+{
+    const float m = 9.0f, t = 1.5f;
+    ui_rect(r.x, r.y, m, t, color);
+    ui_rect(r.x, r.y + t, t, m - t, color);
+    ui_rect(r.x + r.w - m, r.y, m, t, color);
+    ui_rect(r.x + r.w - t, r.y + t, t, m - t, color);
+    ui_rect(r.x, r.y + r.h - t, m, t, color);
+    ui_rect(r.x, r.y + r.h - m, t, m - t, color);
+    ui_rect(r.x + r.w - m, r.y + r.h - t, m, t, color);
+    ui_rect(r.x + r.w - t, r.y + r.h - m, t, m - t, color);
+}
+
+/* The 96 px ensō, centred at a size in pixels. */
+static void look_ring(float cx, float cy, float size, u32 color)
+{
+    const float scale = size / 96.0f;
+    ui_image_tint(UI_IMAGE_LOOK_RING, cx - 48.0f * scale, cy - 48.0f * scale, scale, color);
+}
+
+static void look_dot(float cx, float cy, float size, u32 color)
+{
+    const float scale = size / 32.0f;
+    ui_image_tint(UI_IMAGE_LOOK_DOT, cx - 16.0f * scale, cy - 16.0f * scale, scale, color);
+}
+
+static void draw_look_pad(const App *app, bool r3_held)
+{
+    const UiRect p = LOOK_PAD;
+    /* The theme's own wallpaper, calmed down so the ink reads over it. */
+    if (!ui_wallpaper(p)) ui_rect_r(p, UI_SURFACE);
+    ui_rect_r(p, C2D_Color32(0x00, 0x00, 0x00, 0x60));
+    ui_outline(p.x, p.y, p.w, p.h, 1.0f, ui_with_alpha(UI_ACCENT, 0x70));
+    look_corners(p, UI_ACCENT);
+
+    const u64 now = ui_ticks();
+    const bool stick = app->look_mode == 1;
+    ui_text(p.x + 8, p.y + 5, 11, UI_ACCENT, UI_ALIGN_LEFT, "視点");
+    ui_label(p.x + 32, p.y + 6, 11, UI_TEXT_DIM, UI_ALIGN_LEFT, stick ? "PUSH TO LOOK" : "DRAG TO LOOK");
+    ui_label(p.x + 8, p.y + p.h - 18, 11, UI_TEXT_FAINT, UI_ALIGN_LEFT, "DOUBLE-TAP  R3");
+
+    /* R3 in the corner, for presses without a double tap; HIDE above it
+     * brings the stats back. */
+    look_chip(LOOK_R3, "R3", r3_held, false);
+    look_chip(LOOK_HIDE, "HIDE", false, pressed(app, LOOK_HIDE));
+
+    /* Idle: a faint ensō says "touch here". */
+    const float since_release = app->look_released_at ? (float)(now - app->look_released_at) : 1e9f;
+    if (!app->look_active && since_release > LOOK_RELEASE_MS)
+        look_ring(p.x + p.w / 2, p.y + p.h / 2 + 4, 58, ui_with_alpha(UI_TEXT, 0x38));
+
+    /* The ink trail: newest dots biggest, fading out. */
+    for (unsigned i = 0; i < 10; ++i) {
+        const u64 at = app->look_trail_at[i];
+        if (!at || now - at > (u64)LOOK_TRAIL_MS) continue;
+        const float k = 1.0f - (float)(now - at) / LOOK_TRAIL_MS;
+        look_dot(app->look_trail_x[i], app->look_trail_y[i], 6.0f + 8.0f * k,
+                 ui_with_alpha(UI_ACCENT, (u8)(0xB0 * k)));
+    }
+
+    if (app->look_active) {
+        const float fx = app->look_x, fy = app->look_y;
+        if (stick) {
+            /* The ring is the stick's rim, centred where the finger landed
+             * (dragged along past the rim); the dot is the finger. */
+            const float ax = app->look_anchor_x, ay = app->look_anchor_y;
+            float dx = fx - ax, dy = fy - ay;
+            const float limit = app->look_radius > 0.0f ? app->look_radius : 34.0f;
+            const float d = sqrtf(dx * dx + dy * dy);
+            if (d > limit) { dx *= limit / d; dy *= limit / d; }
+            look_ring(ax, ay, limit * 2.0f + 12.0f, ui_with_alpha(UI_TEXT, 0xE0));
+            look_dot(ax + dx, ay + dy, 22, UI_ACCENT);
+        } else {
+            /* The ring rides under the finger and swells as it turns. */
+            look_ring(fx, fy, 48 + 18 * app->look_amount, ui_with_alpha(UI_TEXT, 0xE0));
+            look_dot(fx, fy, 12, UI_ACCENT);
+        }
+    } else if (since_release <= LOOK_RELEASE_MS) {
+        /* Lifting the finger: the ring opens out and fades. */
+        const float k = since_release / LOOK_RELEASE_MS;
+        look_ring(app->look_release_x, app->look_release_y, 56 + 30 * k,
+                  ui_with_alpha(UI_TEXT, (u8)(0xC0 * (1.0f - k))));
+    }
+}
+
+static void draw_look_layout(const App *app, uint16_t held)
+{
+    draw_stick_button(LOOK_L3, "L3", "左", (held & GFN_PAD_LEFT_THUMB) != 0);
+    const bool guide = (held & GFN_PAD_GUIDE) != 0;
+    const float gx = LOOK_PS.x + LOOK_PS.w / 2, gy = LOOK_PS.y + LOOK_PS.h / 2;
+    ui_ring(gx, gy, 17, 1.5f, guide ? UI_ACCENT : UI_LINE_STRONG, guide ? UI_ACCENT : UI_BG);
+    ui_text(gx, gy - 7, 12, guide ? UI_BG : UI_TEXT, UI_ALIGN_CENTER, "PS");
+    draw_look_stats(app);
+    draw_look_pad(app, (held & GFN_PAD_RIGHT_THUMB) != 0);
+}
+
+/* The usual layout: L3 and R3 columns, stats (or the mouse pad or zoom map)
+ * between them, PS below. */
+static void draw_classic_layout(const App *app, uint16_t held)
+{
+    const WebRtcTransport *t = app->transport;
     draw_stick_button(STR_L3, "L3", "左", (held & GFN_PAD_LEFT_THUMB) != 0);
     draw_stick_button(STR_R3, "R3", "右", (held & GFN_PAD_RIGHT_THUMB) != 0);
 
@@ -2731,13 +2928,34 @@ static void draw_stream_bottom(const App *app, float overlay_p)
     ui_ring(gx, gy, 17, 1.5f, guide ? UI_ACCENT : UI_LINE_STRONG, guide ? UI_ACCENT : UI_BG);
     ui_text(gx, gy - 7, 12, guide ? UI_BG : UI_TEXT, UI_ALIGN_CENTER, "PS");
     ui_hline(STR_L3.x + STR_L3.w + 6, gy, gx - 17 - (STR_L3.x + STR_L3.w + 6) - 4, UI_LINE);
-    ui_hline(gx + 21, gy, STR_R3.x - 6 - (gx + 21), UI_LINE);
+    if (app->look_available) {
+        /* C-STICK sits on the right-hand rule: tap it for the touch camera. */
+        ui_hline(gx + 21, gy, STR_LOOK.x - 4 - (gx + 21), UI_LINE);
+        look_chip(STR_LOOK, "C-STICK", false, pressed(app, STR_LOOK));
+    } else {
+        ui_hline(gx + 21, gy, STR_R3.x - 6 - (gx + 21), UI_LINE);
+    }
     if (app->settings.gyro_mode != GFN_GYRO_OFF) {
         /* Gyro badge on the left rule, lit while gyro is steering. */
         const bool live = gfn_input_gyro_active();
         ui_rect(78, gy - 8, 44, 16, UI_BG);
         ui_label(100, gy - 6, 11, live ? UI_ACCENT : UI_TEXT_FAINT, UI_ALIGN_CENTER, "GYRO");
     }
+}
+
+static void draw_stream_bottom(const App *app, float overlay_p)
+{
+    const WebRtcTransport *t = app->transport;
+    if (app->keyboard_open) {
+        remote_keyboard_draw(t, app->touching, app->touch_x, app->touch_y);
+        return;
+    }
+    draw_stream_header(app);
+
+    const uint16_t held = (app->touching ? screens_stream_held_buttons(app, app->touch_x, app->touch_y) : 0) |
+                          (app->look_r3 ? GFN_PAD_RIGHT_THUMB : 0);
+    if (app->look_mode) draw_look_layout(app, held);
+    else draw_classic_layout(app, held);
 
     char zoom[16];
     const unsigned level = mvd_video_zoom_level();
@@ -2789,7 +3007,8 @@ static void draw_welcome_back(const App *app)
 
 static void draw_modal_bottom(const App *app, float p)
 {
-    ui_rect(0, 0, UI_BOTTOM_WIDTH, UI_HEIGHT, ui_with_alpha(UI_BG, (u8)(0xC8 * p)));
+    /* Nearly opaque: the library's own text showed through the title. */
+    ui_rect(0, 0, UI_BOTTOM_WIDTH, UI_HEIGHT, ui_with_alpha(UI_BG, (u8)(0xF0 * p)));
     ui_offset(0.0f, (1.0f - p) * 10.0f);
     ui_text(160, 68, 12, UI_ACCENT, UI_ALIGN_CENTER, app->modal_jp);
     ui_label(160, 84, 11, UI_TEXT, UI_ALIGN_CENTER, app->modal_title);
@@ -2895,6 +3114,12 @@ uint16_t screens_stream_held_buttons(const App *app, int x, int y)
 {
     if (app->view != VIEW_STREAM || app->keyboard_open || app->stream_menu || app->controls_open)
         return 0;
+    if (app->look_mode) {
+        if (ui_hit(LOOK_L3, x, y)) return GFN_PAD_LEFT_THUMB;
+        if (ui_hit(LOOK_R3, x, y)) return GFN_PAD_RIGHT_THUMB;
+        if (ui_hit(LOOK_PS, x, y)) return GFN_PAD_GUIDE;
+        return 0;
+    }
     if (ui_hit(STR_L3, x, y)) return GFN_PAD_LEFT_THUMB;
     if (ui_hit(STR_R3, x, y)) return GFN_PAD_RIGHT_THUMB;
     if (ui_hit(STR_GUIDE, x, y)) return GFN_PAD_GUIDE;
@@ -3021,6 +3246,8 @@ AppAction screens_touch(const App *app, int x, int y)
             if (!ui_hit(MENU_PANEL, x, y)) return ACTION_MENU_RESUME;
             break;
         }
+        if (app->look_mode && ui_hit(LOOK_HIDE, x, y)) return ACTION_LOOK_TOGGLE;
+        if (app->look_available && !app->look_mode && ui_hit(STR_LOOK, x, y)) return ACTION_LOOK_TOGGLE;
         if (ui_hit(stream_button(0), x, y)) return ACTION_STREAM_KEYBOARD;
         if (ui_hit(stream_button(1), x, y)) return ACTION_STREAM_POINTER;
         if (ui_hit(stream_button(2), x, y)) return ACTION_STREAM_ZOOM;

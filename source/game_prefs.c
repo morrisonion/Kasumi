@@ -31,13 +31,13 @@ static int read_int(json_t *e, const char *key)
 GamePrefs game_prefs_none(void)
 {
     return (GamePrefs){ .bitrate = -1, .gyro = -1, .layout = -1, .camera_speed = -1, .camera_invert = -1,
-                        .gyro_speed = -1 };
+                        .gyro_speed = -1, .touch_camera = -1 };
 }
 
 bool game_prefs_custom(const GamePrefs *prefs)
 {
     return prefs->bitrate >= 0 || prefs->gyro >= 0 || prefs->layout >= 0 || prefs->camera_speed >= 0 ||
-           prefs->camera_invert >= 0 || prefs->gyro_speed >= 0 || prefs->has_map;
+           prefs->camera_invert >= 0 || prefs->gyro_speed >= 0 || prefs->touch_camera >= 0 || prefs->has_map;
 }
 
 GamePrefs game_prefs_get(const char *app_id)
@@ -52,6 +52,7 @@ GamePrefs game_prefs_get(const char *app_id)
     prefs.camera_speed = read_int(e, "camera_speed");
     prefs.camera_invert = read_int(e, "camera_invert");
     prefs.gyro_speed = read_int(e, "gyro_speed");
+    prefs.touch_camera = read_int(e, "touch_camera");
     json_t *map = json_object_get(e, "map");
     if (json_is_array(map) && json_array_size(map) == sizeof(prefs.map)) {
         prefs.has_map = true;
@@ -74,6 +75,7 @@ void game_prefs_set(const char *app_id, const GamePrefs *prefs)
         if (prefs->camera_speed >= 0) json_object_set_new(entry, "camera_speed", json_integer(prefs->camera_speed));
         if (prefs->camera_invert >= 0) json_object_set_new(entry, "camera_invert", json_integer(prefs->camera_invert));
         if (prefs->gyro_speed >= 0) json_object_set_new(entry, "gyro_speed", json_integer(prefs->gyro_speed));
+        if (prefs->touch_camera >= 0) json_object_set_new(entry, "touch_camera", json_integer(prefs->touch_camera));
         if (prefs->has_map) {
             json_t *map = json_array();
             for (size_t i = 0; i < sizeof(prefs->map); ++i) json_array_append_new(map, json_integer(prefs->map[i]));

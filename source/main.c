@@ -1,6 +1,7 @@
 #include <3ds.h>
 
 #include <malloc.h>
+#include <math.h>
 #include <poll.h>
 #include <stdarg.h>
 #include <jansson.h>
@@ -199,11 +200,31 @@ static void render_wide_video(bool draw_bottom)
             ++skipped;
             ++g_perf.skipped;
         }
-        /* Strict two-vblank cadence: a frame is never shown for only one
-         * refresh (that reads as a hitch too); overflow is trimmed above. */
-        if (ready && since >= 2) {
+        /* Strict cadence, two vblanks at 30 fps and one at 60: a frame is
+         * never shown for a shorter time than the others (that reads as a
+         * hitch too); overflow is trimmed above. */
+        /* The rate NVIDIA really sends, not the one asked for: a 60 fps test
+         * that got 30 showed every frame twice as "repeated" and grew the
+         * reserve (test report ZUFZFS). Decoded frames over ~2 s. */
+        static unsigned rate_frames;
+        static u64 rate_since;
+        static bool sixty;
+        const unsigned decoded_now = mvd_video_decoded_frames();
+        if (!rate_since || decoded_now < rate_frames) {
+            rate_since = now_ms;
+            rate_frames = decoded_now;
+        } else if (now_ms - rate_since >= 2000) {
+            const unsigned fps = (unsigned)((decoded_now - rate_frames) * 1000ull / (now_ms - rate_since));
+            const bool was = sixty;
+            sixty = stream_profile_fps() >= 60 && fps >= 45;
+            if (sixty != was) diagnostic_log("VIDEO", "pacing %s (%u fps arriving)", sixty ? "60" : "30", fps);
+            rate_since = now_ms;
+            rate_frames = decoded_now;
+        }
+        const u32 cadence = sixty ? 1 : 2;
+        if (ready && since >= cadence) {
             present = true;
-        } else if (!ready && since == 2) {
+        } else if (!ready && since == cadence) {
             ++repeated;
             ++g_perf.repeated;
             if (last_repeat_at && now_ms - last_repeat_at < 20000) reserve = reserve_low + 1;
@@ -264,6 +285,9 @@ static void render_wide_video(bool draw_bottom)
     ui_frame_begin(false);
     if (frame) {
         ui_begin_top_video();
+        unsigned video_w, video_h;
+        mvd_video_wide_size(&video_w, &video_h);
+        ui_set_video_size(video_w, video_h);
         ui_draw_video();
     }
     if (draw_bottom) {
@@ -525,8 +549,8 @@ static void prepare_game_session(const GfnGame *game)
         diagnostic_log("NET", "the last Standard session on this network was choppy: Weak / hotspot for this one");
         show_notice("Choppy here last time: using Weak / hotspot mode");
     }
-    diagnostic_log("VIDEO", "launch profile=%s %ux%u@30 initial=%u min=%u max=%u dynamic=%u sharpen=%d",
-                   stream_profile_name(), stream_profile_width(), stream_profile_height(),
+    diagnostic_log("VIDEO", "launch profile=%s %ux%u@%u initial=%u min=%u max=%u dynamic=%u sharpen=%d",
+                   stream_profile_name(), stream_profile_width(), stream_profile_height(), stream_profile_fps(),
                    stream_profile_initial_bitrate(), stream_profile_min_bitrate(),
                    stream_profile_max_bitrate(), stream_profile_dynamic_mode(),
                    stream_profile_sharpen());
@@ -550,7 +574,7 @@ static void launch_game(const GfnGame *game)
     last_launch = now;
     prepare_game_session(game);
     g_app.limit_wait_until = g_app.limit_retry_at = 0;
-    g_app.limit_unclosable = g_app.limit_rate = false;
+    g_app.limit_unclosable = g_app.limit_rate = g_app.limit_busy = false;
     launch_begin(false, stream_profile_weak(), g_app.auto_weak);
     submit_job(NET_JOB_START_SESSION, "Creating your cloud session...", NULL, &g_current_game);
     if (g_app.settings.voice_cues) menu_audio_cue(MENU_CUE_ITTERASSHAI);
@@ -770,6 +794,206 @@ static void change_setting(int direction)
     settings_apply_picture(&g_app.settings);
 }
 
+/* ---- Touch camera ---------------------------------------------------------- */
+
+/* The running game's options (its custom button map survives menu toggles). */
+static GamePrefs g_session_prefs;
+
+/* Settings > Controls > Touch camera, or this game's own choice. */
+static unsigned touch_camera_mode(void)
+{
+    const int own = g_session_prefs.touch_camera;
+    return own >= 0 && own < 3 ? (unsigned)own : g_app.settings.touch_camera;
+}
+
+/* Stick: full push this far from the centre, like the C-Stick's rim
+ * (Settings > Controls > Touch C-stick size). */
+static float look_radius(void)
+{
+    static const float RADIUS[3] = { 24.0f, 34.0f, 46.0f };
+    return RADIUS[g_app.settings.touch_stick_size < 3 ? g_app.settings.touch_stick_size : 1];
+}
+#define LOOK_RADIUS look_radius()
+/* The resistive panel drops a light touch for a frame or two; a finger
+ * that comes back within this long, near where it was, never left. */
+#define LOOK_GRACE_MS 160
+/* One sample this far from the last is panel noise unless the next agrees. */
+#define LOOK_JUMP_PX 60
+
+static struct {
+    bool active;
+    int last_x, last_y;
+    /* Stick mode: the centre, dragged along when pushed past the rim. */
+    float cx, cy;
+    u64 began_at, last_move_at, lost_at;
+    unsigned travel;
+    float vx, vy;
+    /* The push sent last (kept through a dropped touch). */
+    float sx, sy;
+    bool jump_pending;
+    u64 tap_at;
+    int tap_x, tap_y;
+} g_look;
+
+static void look_trail_push(int x, int y, u64 now)
+{
+    const unsigned i = g_app.look_trail_head++ % 10;
+    g_app.look_trail_x[i] = x;
+    g_app.look_trail_y[i] = y;
+    g_app.look_trail_at[i] = now;
+}
+
+static void look_release(u64 now)
+{
+    if (!g_look.active) return;
+    g_look.active = false;
+    g_look.lost_at = 0;
+    g_look.sx = g_look.sy = 0.0f;
+    g_app.look_active = false;
+    g_app.look_r3 = false;
+    g_app.look_amount = 0.0f;
+    g_app.look_released_at = now;
+    g_app.look_release_x = g_look.last_x;
+    g_app.look_release_y = g_look.last_y;
+    /* A short touch that barely moved is a tap; two close together hold R3. */
+    if (g_look.travel <= 8 && now - g_look.began_at < 250) {
+        g_look.tap_at = now;
+        g_look.tap_x = g_look.last_x;
+        g_look.tap_y = g_look.last_y;
+    }
+}
+
+static void look_begin(int x, int y, u64 now)
+{
+    g_look.active = true;
+    g_look.last_x = x;
+    g_look.last_y = y;
+    g_look.cx = (float)x;
+    g_look.cy = (float)y;
+    g_look.began_at = g_look.last_move_at = now;
+    g_look.lost_at = 0;
+    g_look.travel = 0;
+    g_look.vx = g_look.vy = g_look.sx = g_look.sy = 0.0f;
+    g_look.jump_pending = false;
+    g_app.look_active = true;
+    g_app.look_anchor_x = x;
+    g_app.look_anchor_y = y;
+    const int tx = x - g_look.tap_x, ty = y - g_look.tap_y;
+    g_app.look_r3 = g_look.tap_at && now - g_look.tap_at < 300 && tx * tx + ty * ty < 28 * 28;
+    g_look.tap_at = 0;
+    look_trail_push(x, y, now);
+}
+
+/* The pad as a right stick. Stick mode is a C-Stick under the finger: the
+ * push is the distance from where it landed, held for as long as the
+ * finger stays there, and it goes through the C-Stick's own deadzone and
+ * Camera stick speed. Trackpad mode turns by the finger's speed instead. */
+static void look_tick(bool touch_down, bool touching, touchPosition touch)
+{
+    const u64 now = osGetTime();
+    const unsigned mode = g_app.look_mode;
+    if (!mode || g_app.stream_menu || g_app.controls_open || g_app.modal != MODAL_NONE) {
+        look_release(now);
+        gfn_input_set_touch_stick(0.0f, 0.0f);
+        gfn_input_set_touch_look(0.0f, 0.0f);
+        return;
+    }
+    const int x = touch.px, y = touch.py;
+    g_app.look_radius = LOOK_RADIUS;
+    if (g_look.active && !touching) {
+        /* Contact lost: hold the push for a moment before letting go. */
+        if (!g_look.lost_at) g_look.lost_at = now;
+        if (now - g_look.lost_at > LOOK_GRACE_MS) look_release(now);
+    } else if (g_look.active && g_look.lost_at) {
+        /* Back: the same finger if it is near, else a new touch. */
+        const int jx = x - g_look.last_x, jy = y - g_look.last_y;
+        g_look.lost_at = 0;
+        if (jx * jx + jy * jy > LOOK_JUMP_PX * LOOK_JUMP_PX) look_release(now);
+        else g_look.last_move_at = now;
+    }
+    if (!g_look.active && touching && touch_down && ui_hit(screens_look_pad(), x, y) &&
+        !ui_hit(screens_look_r3(), x, y) && !ui_hit(screens_look_hide(), x, y))
+        look_begin(x, y, now);
+
+    if (g_look.active && touching) {
+        int dx = x - g_look.last_x, dy = y - g_look.last_y;
+        if (dx * dx + dy * dy > LOOK_JUMP_PX * LOOK_JUMP_PX && !g_look.jump_pending) {
+            /* A wild sample from a light press: wait for the next one. */
+            g_look.jump_pending = true;
+            dx = dy = 0;
+        } else {
+            g_look.jump_pending = false;
+        }
+        const int fx = g_look.last_x + dx, fy = g_look.last_y + dy;
+        if (dx || dy) {
+            g_look.travel += (unsigned)(abs(dx) + abs(dy));
+            look_trail_push(fx, fy, now);
+        }
+        if (mode == 1) {
+            float ox = (float)fx - g_look.cx, oy = (float)fy - g_look.cy;
+            const float d = sqrtf(ox * ox + oy * oy);
+            if (d > LOOK_RADIUS) {
+                /* Past the rim the centre follows, so turning back is
+                 * immediate, like letting a stick spring back. */
+                g_look.cx += ox * (1.0f - LOOK_RADIUS / d);
+                g_look.cy += oy * (1.0f - LOOK_RADIUS / d);
+                ox = (float)fx - g_look.cx;
+                oy = (float)fy - g_look.cy;
+            }
+            g_look.sx = ox / LOOK_RADIUS;
+            g_look.sy = -oy / LOOK_RADIUS;
+            g_app.look_anchor_x = (int)(g_look.cx + 0.5f);
+            g_app.look_anchor_y = (int)(g_look.cy + 0.5f);
+        } else {
+            /* The panel reports less often than this loop runs, so speed is
+             * measured between real moves. Full push at 260 px a second. */
+            if (dx || dy) {
+                u64 dt = now - g_look.last_move_at;
+                if (dt < 8) dt = 8;
+                if (dt > 100) dt = 100;
+                g_look.vx += ((float)dx * 1000.0f / (float)dt / 260.0f - g_look.vx) * 0.6f;
+                g_look.vy += (-(float)dy * 1000.0f / (float)dt / 260.0f - g_look.vy) * 0.6f;
+                g_look.last_move_at = now;
+            } else if (now - g_look.last_move_at > 40) {
+                g_look.vx *= 0.6f;
+                g_look.vy *= 0.6f;
+            }
+            g_look.sx = g_look.vx;
+            g_look.sy = g_look.vy;
+        }
+        g_look.last_x = fx;
+        g_look.last_y = fy;
+    } else if (g_look.active && mode != 1) {
+        /* Trackpad through a dropped touch: ease off. */
+        g_look.sx *= 0.6f;
+        g_look.sy *= 0.6f;
+    }
+    g_app.look_x = g_look.last_x;
+    g_app.look_y = g_look.last_y;
+
+    float sx = g_look.active ? g_look.sx : 0.0f, sy = g_look.active ? g_look.sy : 0.0f;
+    const float magnitude = sqrtf(sx * sx + sy * sy);
+    if (mode == 1) {
+        g_app.look_amount = magnitude > 1.0f ? 1.0f : magnitude;
+        gfn_input_set_touch_stick(sx, sy);
+        gfn_input_set_touch_look(0.0f, 0.0f);
+        return;
+    }
+    /* Trackpad: a small dead spot, then a floor over the game's own stick
+     * deadzone so slow drags still turn. */
+    if (magnitude < 0.04f) {
+        sx = sy = 0.0f;
+        g_app.look_amount = 0.0f;
+    } else {
+        const float amount = 0.12f + 0.88f * (magnitude > 1.0f ? 1.0f : magnitude);
+        sx = sx / magnitude * amount;
+        sy = sy / magnitude * amount;
+        g_app.look_amount = amount;
+    }
+    gfn_input_set_touch_stick(0.0f, 0.0f);
+    gfn_input_set_touch_look(sx, sy);
+}
+
 /* ---- Pointer mode -------------------------------------------------------- */
 
 static void touchpad_begin(unsigned x, unsigned y)
@@ -916,7 +1140,7 @@ static void handle_modal(u32 down, AppAction action)
         } else {
             diagnostic_log("APP", "stopped waiting for NVIDIA to free the slot");
             g_app.limit_wait_until = g_app.limit_retry_at = 0;
-            launch_end(g_app.limit_rate ? "429" : "limit", launch_share_id());
+            launch_end(g_app.limit_busy ? "limited" : g_app.limit_rate ? "429" : "limit", launch_share_id());
         }
         return;
     }
@@ -1133,9 +1357,6 @@ static void handle_guide(u32 down, AppAction action)
     }
 }
 
-/* The running game's options (its custom button map survives menu toggles). */
-static GamePrefs g_session_prefs;
-
 static void reapply_game_map(void)
 {
     if (gfn_session_active(&g_client) && g_session_prefs.has_map) gfn_input_set_custom_map(g_session_prefs.map);
@@ -1265,6 +1486,7 @@ static void handle_options(u32 down, u32 repeat, AppAction action)
     case OPTION_LAYOUT: CYCLE(prefs.layout, 2); break;
     case OPTION_CAMERA_SPEED: CYCLE(prefs.camera_speed, 4); break;
     case OPTION_CAMERA_INVERT: CYCLE(prefs.camera_invert, 3); break;
+    case OPTION_TOUCH_CAMERA: CYCLE(prefs.touch_camera, 3); break;
     case OPTION_GYRO_SPEED: CYCLE(prefs.gyro_speed, 3); break;
     case OPTION_MAPPING:
         if ((down & KEY_A) || action == ACTION_OPTION_NEXT || action == ACTION_OPTION_PREV) open_mapping(game, &prefs);
@@ -1552,6 +1774,11 @@ static void handle_stream(u32 down, u32 held, AppAction action, bool touch_down,
             mvd_video_toggle_zoom();
         }
         return;
+    case ACTION_LOOK_TOGGLE:
+        /* Kept for the next game too. */
+        g_app.settings.touch_camera_shown = !g_app.settings.touch_camera_shown;
+        settings_save(&g_app.settings);
+        return;
     case ACTION_STREAM_MENU:
         g_app.stream_menu = true;
         g_app.stream_menu_index = STREAM_MENU_RESUME;
@@ -1589,6 +1816,19 @@ static void queue_auto_report(const char *trigger);
 static volatile u64 g_suspended_at, g_resumed_at;
 static volatile bool g_suspend_was_sleep;
 static aptHookCookie g_apt_cookie;
+
+/* Where the last main-loop pass spent its time, so a ui-stall says which
+ * part froze (beta.31: one console stopped for 12.8 s in menus, no job). */
+enum { PHASE_SYNC, PHASE_TICKS, PHASE_HANDLE, PHASE_NETWORK, PHASE_RENDER, PHASE_COUNT };
+static unsigned g_phase_ms[PHASE_COUNT];
+static u64 g_phase_at;
+
+static void phase_end(int phase)
+{
+    const u64 now = osGetTime();
+    g_phase_ms[phase] = now > g_phase_at ? (unsigned)(now - g_phase_at) : 0;
+    g_phase_at = now;
+}
 
 /* Any HOME, sleep or applet event: a long main-loop gap around one is not
  * a stall (see watch_for_bugs). */
@@ -2550,6 +2790,11 @@ static unsigned g_limit_tries;
 
 static u64 limit_retry_delay(void)
 {
+    /* Limited mode: 45 s, then 15 s longer each time, at most 2 min. */
+    if (g_app.limit_busy) {
+        const u64 busy = 45000u + 15000u * (u64)g_limit_tries;
+        return busy < 120000u ? busy : 120000u;
+    }
     const u64 delay = 90000u + 30000u * (u64)g_limit_tries;
     if (g_app.limit_rate && delay < 120000u) return 120000u;
     return delay < 180000u ? delay : 180000u;
@@ -2559,6 +2804,12 @@ static void limit_wait_text(void)
 {
     const u64 now = osGetTime();
     const unsigned left = g_app.limit_retry_at > now ? (unsigned)((g_app.limit_retry_at - now + 999) / 1000) : 0;
+    if (g_app.limit_busy) {
+        snprintf(g_app.modal_text, sizeof(g_app.modal_text),
+                 "NVIDIA is limiting new sessions for a few minutes (limited mode). Kasumi tries again by "
+                 "itself: next try in %u:%02u.", left / 60, left % 60);
+        return;
+    }
     if (g_app.limit_rate) {
         snprintf(g_app.modal_text, sizeof(g_app.modal_text),
                  "NVIDIA asked Kasumi to slow down after several launches. Trying again in %u:%02u by itself.",
@@ -2601,6 +2852,11 @@ static void launch_failed(void)
         return;
     }
     if (g_client.limit_wait) {
+        if (g_app.limit_busy) {
+            /* From limited mode to a slot wait: a fresh 15 minutes. */
+            g_app.limit_busy = false;
+            g_app.limit_wait_until = 0;
+        }
         if (g_client.limit_unclosable) g_app.limit_unclosable = true;
         g_app.limit_rate = g_client.limit_rate;
         if (!g_app.limit_wait_until) {
@@ -2625,6 +2881,29 @@ static void launch_failed(void)
         launch_end(g_app.limit_rate ? "429" : "limit", launch_share_id());
         return;
     }
+    /* NVIDIA's limited mode passes within minutes: 54 launches in beta.31's
+     * export ended on it, each a Retry press away. Wait and retry here. */
+    if (!strcmp(g_client.fail_code, "limited")) {
+        if (!g_app.limit_wait_until || !g_app.limit_busy) {
+            g_app.limit_wait_until = now + LIMIT_WAIT_MS;
+            g_limit_tries = 0;
+            g_app.limit_busy = true;
+            diagnostic_log("APP", "NVIDIA is in limited mode: waiting to retry");
+        }
+        if (now < g_app.limit_wait_until) {
+            g_app.limit_retry_at = now + limit_retry_delay();
+            ++g_limit_tries;
+            open_modal(MODAL_LIMIT_WAIT, "混雑", "NVIDIA IS BUSY", "");
+            limit_wait_text();
+            return;
+        }
+        g_app.limit_wait_until = g_app.limit_retry_at = 0;
+        g_app.limit_busy = false;
+        open_modal(MODAL_ERROR, "起動失敗", "LAUNCH FAILED",
+                   "NVIDIA stayed in limited mode for 15 minutes. Try again a little later.");
+        launch_end("limited", launch_share_id());
+        return;
+    }
     /* Beta.23: one console asked for Japan from Australia 18 times. */
     if (!strcmp(g_client.fail_code, "region") && g_app.settings.server[0] &&
         strcmp(g_app.settings.server, REGION_CHOICE_NVIDIA)) {
@@ -2638,7 +2917,26 @@ static void launch_failed(void)
         submit_job(NET_JOB_START_SESSION, "Trying again on Auto...", NULL, &g_current_game);
         return;
     }
-    open_modal(MODAL_ERROR, "起動失敗", "LAUNCH FAILED", g_client.status);
+    const char *failed_text = g_client.status;
+    char entitlement[sizeof(g_app.modal_text)];
+    unsigned library_games = 0;
+    /* Entitlement was the most common refusal in beta.31's export (62):
+     * accounts never set up at play.geforcenow.com, and games picked from
+     * search that the account doesn't have. Say which. */
+    if (!strcmp(g_client.fail_code, "entitlement") && provider_is_nvidia() && gfn_library_known(&library_games)) {
+        if (!library_games) {
+            snprintf(entitlement, sizeof(entitlement),
+                     "Your GeForce NOW library is empty, so NVIDIA won't start games yet. On a phone or PC, "
+                     "sign in at play.geforcenow.com, accept the terms and link Steam or Epic, then try again.");
+            failed_text = entitlement;
+        } else if (!gfn_in_library(&g_current_game)) {
+            snprintf(entitlement, sizeof(entitlement),
+                     "%.40s isn't in your GeForce NOW library. Add it at play.geforcenow.com (and own it on "
+                     "its store), refresh your library here, then try again.", g_current_game.title);
+            failed_text = entitlement;
+        }
+    }
+    open_modal(MODAL_ERROR, "起動失敗", "LAUNCH FAILED", failed_text);
     log_session_end("launch-failed");
     /* NVIDIA's limited mode and an account without the game are not bugs
      * (beta.27 report QQEN7S: five entitlement refusals, five reports). An
@@ -3029,10 +3327,19 @@ int main(int argc, char **argv)
             loop_started = loop_now;
             /* The UI froze with no HOME, sleep or applet in between. */
             static unsigned apt_seen;
-            if (loop_ms > 2500 && apt_seen == g_apt_events)
-                diagnostic_flag("ui-stall", "main loop blocked %u ms (view %d, job %d)", loop_ms, (int)g_app.view,
-                                (int)net_worker_current_job());
+            /* An hour or more is the clock being changed, not a stall (a beta.31
+             * report showed 38 days). */
+            if (loop_ms > 2500 && loop_ms < 3600000 && apt_seen == g_apt_events) {
+                unsigned measured = 0;
+                for (int i = 0; i < PHASE_COUNT; ++i) measured += g_phase_ms[i];
+                diagnostic_flag("ui-stall", "main loop blocked %u ms (view %d, job %d) sync=%u ticks=%u input=%u "
+                                "net=%u render=%u other=%u", loop_ms, (int)g_app.view, (int)net_worker_current_job(),
+                                g_phase_ms[PHASE_SYNC], g_phase_ms[PHASE_TICKS], g_phase_ms[PHASE_HANDLE],
+                                g_phase_ms[PHASE_NETWORK], g_phase_ms[PHASE_RENDER],
+                                loop_ms > measured ? loop_ms - measured : 0);
+            }
             apt_seen = g_apt_events;
+            g_phase_at = loop_now;
             if (g_app.view == VIEW_STREAM && loop_ms < 5000) {
                 if (loop_ms > g_loop_max_ms) g_loop_max_ms = loop_ms;
                 if (loop_ms > 25) {
@@ -3045,6 +3352,7 @@ int main(int argc, char **argv)
         net_worker_sync(&g_client);
         finish_jobs();
         probe_tick();
+        phase_end(PHASE_SYNC);
         g_app.busy = net_worker_busy() ? g_busy_message : NULL;
         hidScanInput();
         const u32 down = hidKeysDown();
@@ -3074,6 +3382,7 @@ int main(int argc, char **argv)
         shortcut_tick();
         shortcut_launch_tick();
         library_upgrade_tick();
+        phase_end(PHASE_TICKS);
         if (g_app.whats_new_open && g_app.view != VIEW_STREAM) {
             handle_whats_new(down, repeat, action);
         } else if (g_app.guide_page >= 0 && g_app.view != VIEW_STREAM && !g_app.busy) {
@@ -3099,6 +3408,7 @@ int main(int argc, char **argv)
             case VIEW_STREAM: handle_stream(down, held, action, touch_down, touch); break;
             }
         }
+        phase_end(PHASE_HANDLE);
         if (hidKeysUp() & KEY_TOUCH) touchpad_end();
         if (queue_alert_active() && (down || touch_down)) queue_alert_stop();
         update_pointer_click(down, held);
@@ -3106,14 +3416,23 @@ int main(int argc, char **argv)
 
         /* Game input: touch-held L3/R3/PS, and nothing while menus are up. */
         const bool streaming = g_app.view == VIEW_STREAM;
-        gfn_input_set_virtual_buttons(streaming && g_app.touching
-            ? screens_stream_held_buttons(&g_app, touch.px, touch.py) : 0);
+        /* The touch camera's layout, unless the lower screen is the mouse
+         * pad, the zoom map or the keyboard. */
+        const unsigned look = streaming && !g_transport.pointer_mode && !g_transport.keyboard_mode &&
+                              !mvd_video_zoomed() ? touch_camera_mode() : 0;
+        g_app.look_available = look != 0;
+        g_app.look_mode = g_app.settings.touch_camera_shown ? look : 0;
+        look_tick(touch_down, g_app.touching, touch);
+        gfn_input_set_virtual_buttons((streaming && g_app.touching
+            ? screens_stream_held_buttons(&g_app, touch.px, touch.py) : 0) |
+            (g_app.look_r3 ? GFN_PAD_RIGHT_THUMB : 0));
         gfn_input_set_suppressed(!streaming || g_app.stream_menu || g_app.controls_open || g_app.modal != MODAL_NONE ||
                                  g_app.lid_paused);
 
         tick_network();
         refresh_device_status();
         log_session();
+        phase_end(PHASE_NETWORK);
 
         /* While queued or setting up, stay awake even with the lid shut so
          * the queue keeps moving and the alert can fire. Once playing, only
@@ -3164,6 +3483,7 @@ int main(int argc, char **argv)
          * nonblocking recv every 1 ms instead, and that request flood crashed
          * the system socket module when video started. */
         if (g_app.view == VIEW_STREAM) wait_for_media(4);
+        phase_end(PHASE_RENDER);
     }
 
     finish_history();

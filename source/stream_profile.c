@@ -44,6 +44,10 @@ void stream_profile_set_override(unsigned width, unsigned height)
 void stream_profile_set_probing(bool probing) { g_probing = probing; }
 
 void stream_profile_set_sharpen(bool sharpen) { g_sharpen = sharpen; }
+
+static bool g_fps60;
+void stream_profile_set_fps60(bool on) { g_fps60 = on; }
+unsigned stream_profile_fps(void) { return g_fps60 ? 60 : 30; }
 void stream_profile_set_weak(bool weak) { g_weak = weak; }
 bool stream_profile_weak(void) { return g_weak; }
 bool stream_profile_sharpen(void) { return g_sharpen; }

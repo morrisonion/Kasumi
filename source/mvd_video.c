@@ -140,6 +140,18 @@ bool mvd_video_init(unsigned input_width, unsigned input_height)
     } else if (g_wide) {
         g_output_width = WIDE_OUTPUT_WIDTH;
         g_output_height = WIDE_OUTPUT_HEIGHT;
+        /* The decoder only shrinks: Borderlands 2 switched its stream to
+         * 726x544 (4:3) and stretching that to 800 wide failed with "MVD
+         * config failed D961710D". A narrower or smaller picture keeps its
+         * shape at the largest size that fits; the GPU draws it centred. */
+        if (input_width < WIDE_OUTPUT_WIDTH || input_height < WIDE_OUTPUT_HEIGHT) {
+            float scale = (float)WIDE_OUTPUT_WIDTH / (float)input_width;
+            const float by_height = (float)WIDE_OUTPUT_HEIGHT / (float)input_height;
+            if (by_height < scale) scale = by_height;
+            if (scale > 1.0f) scale = 1.0f;
+            g_output_width = (unsigned)((float)input_width * scale) & ~15u;
+            g_output_height = (unsigned)((float)input_height * scale) & ~15u;
+        }
     } else {
         g_output_width = OUTPUT_WIDTH;
         g_output_height = OUTPUT_HEIGHT;
@@ -257,6 +269,23 @@ bool mvd_video_init(unsigned input_width, unsigned input_height)
     rc = MVDSTD_SetConfig(&g_config);
     diagnostic_log("MVD", "set-config-return rc=%08lX", (unsigned long)rc);
     diagnostic_checkpoint();
+    if (rc != MVD_STATUS_OK && g_wide && g_output_height > 240) {
+        /* An unusual stream size refused at full size: try half size, which
+         * the GPU scales up (better a softer picture than none). */
+        float scale = 400.0f / (float)input_width;
+        const float by_height = 240.0f / (float)input_height;
+        if (by_height < scale) scale = by_height;
+        g_output_width = (unsigned)((float)input_width * scale) & ~15u;
+        g_output_height = (unsigned)((float)input_height * scale) & ~15u;
+        mvdstdGenerateDefaultConfig(&g_config, input_width, input_height, g_output_width, g_output_height,
+                                    NULL, (u32 *)g_output, NULL);
+        g_config.flag_x104 = 1;
+        g_config.output_width_override = g_output_stride;
+        g_config.output_height_override = g_output_alloc_height;
+        rc = MVDSTD_SetConfig(&g_config);
+        diagnostic_log("MVD", "set-config retry output=%ux%u rc=%08lX", g_output_width, g_output_height,
+                       (unsigned long)rc);
+    }
     /* MVDSTD commands use their own status range.  0x17000 is success,
      * despite being non-zero as a normal libctru Result value. */
     if (rc != MVD_STATUS_OK) {
@@ -439,6 +468,13 @@ static void copy_to_top_framebuffer(void)
 }
 
 bool mvd_video_wide(void) { return g_active && g_wide; }
+
+void mvd_video_wide_size(unsigned *width, unsigned *height)
+{
+    const bool known = g_wide && g_output_width && g_output_height;
+    *width = known ? g_output_width : WIDE_OUTPUT_WIDTH;
+    *height = known ? g_output_height : WIDE_OUTPUT_HEIGHT;
+}
 
 unsigned mvd_video_ready_frames(void)
 {

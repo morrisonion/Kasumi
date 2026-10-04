@@ -517,7 +517,15 @@ bool gfn_begin_login(GfnClient *client, const char *provider_choice)
     HttpResponse response;
     if (!http_request("POST", "https://login.nvidia.com/device/authorize", DEVICE_UA,
                       headers, ARRAY_SIZE(headers), form, 128 * 1024, &response)) {
-        snprintf(client->status, sizeof(client->status), "Login TLS/network: %.128s", response.error);
+        char date[16];
+        if (http_clock_wrong(date, sizeof(date)))
+            snprintf(client->status, sizeof(client->status),
+                     "Your 3DS thinks it is %s, so NVIDIA's secure sign-in fails. Set the date and time in "
+                     "System Settings > Other Settings, then try again.", date);
+        else
+            snprintf(client->status, sizeof(client->status),
+                     "Couldn't reach NVIDIA's sign-in (%.60s). Check Wi-Fi, and that the 3DS date and time "
+                     "are right.", response.error);
         client->auth_state = GFN_AUTH_ERROR;
         return false;
     }
@@ -816,10 +824,69 @@ static bool fetch_catalog(GfnClient *client, const char *search_query, bool owne
 
 #define LIBRARY_CACHE_PATH APP_DATA_DIR "/library.json"
 
+/* Which games the account has in its library, kept apart from the list on
+ * screen (a search replaces that): hashes of every store ID. */
+#define LIBRARY_IDS_MAX (GFN_MAX_GAMES * 2)
+static uint32_t g_library_ids[LIBRARY_IDS_MAX];
+static unsigned g_library_id_count, g_library_games;
+static bool g_library_known;
+static LightLock g_library_lock = 1;
+
+static uint32_t id_hash(const char *id)
+{
+    uint32_t hash = 2166136261u;
+    for (; *id; ++id) hash = (hash ^ (uint8_t)*id) * 16777619u;
+    return hash;
+}
+
+static void library_remember(const GfnClient *client)
+{
+    uint32_t ids[LIBRARY_IDS_MAX];
+    unsigned count = 0;
+    for (size_t i = 0; i < client->game_count; ++i) {
+        const GfnGame *g = &client->games[i];
+        if (count < LIBRARY_IDS_MAX && g->app_id[0]) ids[count++] = id_hash(g->app_id);
+        for (unsigned v = 0; v < g->variant_count && count < LIBRARY_IDS_MAX; ++v)
+            ids[count++] = id_hash(g->variants[v].id);
+    }
+    LightLock_Lock(&g_library_lock);
+    memcpy(g_library_ids, ids, count * sizeof(ids[0]));
+    g_library_id_count = count;
+    g_library_games = (unsigned)client->game_count;
+    g_library_known = true;
+    LightLock_Unlock(&g_library_lock);
+}
+
+bool gfn_library_known(unsigned *games)
+{
+    LightLock_Lock(&g_library_lock);
+    const bool known = g_library_known;
+    if (games) *games = g_library_games;
+    LightLock_Unlock(&g_library_lock);
+    return known;
+}
+
+bool gfn_in_library(const GfnGame *game)
+{
+    if (!game) return false;
+    uint32_t wanted[1 + GFN_MAX_VARIANTS];
+    unsigned n = 0;
+    wanted[n++] = id_hash(game->app_id);
+    for (unsigned v = 0; v < game->variant_count; ++v) wanted[n++] = id_hash(game->variants[v].id);
+    bool found = false;
+    LightLock_Lock(&g_library_lock);
+    for (unsigned i = 0; i < g_library_id_count && !found; ++i)
+        for (unsigned k = 0; k < n && !found; ++k)
+            found = g_library_ids[i] == wanted[k];
+    LightLock_Unlock(&g_library_lock);
+    return found;
+}
+
 /* The owned library is kept on the SD card so the next start shows it at
  * once; Refresh fetches it again. It holds titles, IDs and art URLs only. */
 static void library_save(const GfnClient *client)
 {
+    library_remember(client);
     json_t *games = json_array();
     for (size_t i = 0; i < client->game_count; ++i) {
         const GfnGame *g = &client->games[i];
@@ -877,6 +944,7 @@ bool gfn_library_load(GfnClient *client)
     client->library_saved_at = json_is_integer(saved) ? json_integer_value(saved) : 0;
     client->catalog_total = client->game_count;
     json_decref(root);
+    library_remember(client);
     snprintf(client->status, sizeof(client->status), "Library: %lu games (Y refreshes)",
              (unsigned long)client->game_count);
     return true;
@@ -1042,7 +1110,7 @@ static char *build_session_body(const GfnGame *game, const char *device_id)
     json_object_set_new(monitor, "positionY", json_integer(0));
     json_object_set_new(monitor, "widthInPixels", json_integer(stream_profile_width()));
     json_object_set_new(monitor, "heightInPixels", json_integer(stream_profile_height()));
-    json_object_set_new(monitor, "framesPerSecond", json_integer(30));
+    json_object_set_new(monitor, "framesPerSecond", json_integer((json_int_t)stream_profile_fps()));
     json_object_set_new(monitor, "sdrHdrMode", json_integer(0));
     json_set_null(monitor, "displayData");
     json_set_null(monitor, "hdr10PlusGamingData");
@@ -1417,8 +1485,8 @@ static bool apply_session_response(GfnClient *client, HttpResponse *response, co
             char region[40];
             regions_last_used(region, sizeof(region));
             snprintf(client->status, sizeof(client->status),
-                     "The %.30s server isn't open to this account. Use Server: Auto in Settings > Network "
-                     "(code %d).", region[0] ? region : "chosen", status_code);
+                     "The %.24s server isn't open to this account. Abroad? Pick a server in your home "
+                     "country in Settings > Network (code %d).", region[0] ? region : "chosen", status_code);
         } else if (strstr(reason, "ENTITLEMENT")) {
             code = "entitlement";
             GfnProvider provider;

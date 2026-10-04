@@ -78,6 +78,12 @@ bool gfn_input_custom_map_active(void);
 void gfn_input_configure(const GfnInputConfig *config);
 /* Buttons the 3DS lacks (L3, R3, Guide), held from the touch screen. */
 void gfn_input_set_virtual_buttons(uint16_t buttons);
+/* The touch camera's right-stick push, -1..1 each way (y up). It follows
+ * Camera stick speed and Invert camera like the C-Stick, and adds to it. */
+void gfn_input_set_touch_look(float x, float y);
+/* The touch camera's Stick mode: -1..1 each way (y up), read exactly like
+ * the C-Stick (its deadzone, Camera stick speed, Invert) and added to it. */
+void gfn_input_set_touch_stick(float x, float y);
 /* While suppressed, reads return a neutral pad (menus and overlays). */
 void gfn_input_set_suppressed(bool suppressed);
 uint16_t gfn_input_buttons_for_keys(u32 keys);

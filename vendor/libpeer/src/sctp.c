@@ -266,6 +266,9 @@ typedef struct {
   uint16_t len;
   uint8_t tries;
   uint8_t acked;
+  /* A controller state or heartbeat: the next one replaces it, so once
+   * it is overdue it is given up (FORWARD-TSN) rather than resent. */
+  uint8_t lossy;
   uint8_t data[SCTP_RTX_PACKET_MAX];
 } SctpRtxPacket;
 
@@ -284,6 +287,15 @@ typedef struct SctpRetransmitQueue {
    * (the old send-once behaviour) instead of holding input back. */
   int ever_acked;
   int disabled;
+  /* PR-SCTP (RFC 3758): the peer's INIT offered FORWARD-TSN, so lost
+   * controller states can be skipped. Beta.31 reports showed why: on weak
+   * Wi-Fi every lost state was resent one hole at a time, the queue filled
+   * and new input was refused for seconds at a time. */
+  int peer_prsctp;
+  int fwd_off;
+  int have_adv, have_peer_cum;
+  uint32_t adv_point, peer_cum, fwd_sent_ms;
+  uint32_t abandoned, fwd_sent;
 } SctpRetransmitQueue;
 
 static SctpRetransmitQueue* sctp_rtx(Sctp* sctp) {
@@ -297,7 +309,7 @@ static SctpRtxPacket* sctp_rtx_at(SctpRetransmitQueue* q, unsigned index) {
 }
 
 /* Keep a copy of a DATA packet just sent. */
-static void sctp_rtx_store(Sctp* sctp, uint32_t tsn, const uint8_t* packet, size_t len) {
+static void sctp_rtx_store(Sctp* sctp, uint32_t tsn, const uint8_t* packet, size_t len, int lossy) {
   SctpRetransmitQueue* q = sctp_rtx(sctp);
   if (!q || q->disabled)
     return;
@@ -314,7 +326,50 @@ static void sctp_rtx_store(Sctp* sctp, uint32_t tsn, const uint8_t* packet, size
   slot->len = (uint16_t)len;
   slot->tries = 0;
   slot->acked = 0;
+  slot->lossy = (uint8_t)(lossy != 0);
   memcpy(slot->data, packet, len);
+}
+
+/* The peer's INIT or INIT-ACK parameters: does it take FORWARD-TSN? */
+static void sctp_peer_params(Sctp* sctp, const uint8_t* params, int length) {
+  int offset = 0;
+  while (offset + 4 <= length) {
+    uint16_t type, plen;
+    memcpy(&type, params + offset, 2);
+    memcpy(&plen, params + offset + 2, 2);
+    type = ntohs(type);
+    plen = ntohs(plen);
+    if (plen < 4 || offset + plen > length)
+      break;
+    if (type == SCTP_PARAM_FORWARD_TSN_SUPPORTED) {
+      SctpRetransmitQueue* q = sctp_rtx(sctp);
+      if (q && !q->peer_prsctp) {
+        q->peer_prsctp = 1;
+        sctp_diag_log("prsctp peer supports FORWARD-TSN");
+      }
+    }
+    offset += (plen + 3) & ~3;
+  }
+}
+
+/* Tell the peer to treat every TSN up to adv as received. Our chunks are
+ * unordered, so no stream entries are needed. */
+static void sctp_send_forward_tsn(Sctp* sctp, uint32_t adv) {
+  uint8_t packet[sizeof(SctpHeader) + 8];
+  SctpHeader* header = (SctpHeader*)packet;
+  memset(packet, 0, sizeof(packet));
+  header->source_port = htons(sctp->local_port);
+  header->destination_port = htons(sctp->remote_port);
+  header->verification_tag = sctp->verification_tag;
+  uint8_t* chunk = packet + sizeof(SctpHeader);
+  chunk[0] = SCTP_FORWARD_TSN;
+  chunk[1] = 0;
+  const uint16_t chunk_length = htons(8);
+  memcpy(chunk + 2, &chunk_length, 2);
+  const uint32_t network_tsn = htonl(adv);
+  memcpy(chunk + 4, &network_tsn, 4);
+  header->checksum = htonl(sctp_get_checksum(sctp, packet, sizeof(packet)));
+  dtls_srtp_write(sctp->dtls_srtp, packet, sizeof(packet));
 }
 
 /* A SACK: drop what its cumulative TSN covers, mark gap-acked chunks. */
@@ -333,6 +388,10 @@ static void sctp_rtx_ack(Sctp* sctp, const SctpSackChunk* sack, size_t chunk_len
   }
   if (popped)
     q->ever_acked = 1;
+  if (!q->have_peer_cum || (int32_t)(cumulative - q->peer_cum) > 0) {
+    q->peer_cum = cumulative;
+    q->have_peer_cum = 1;
+  }
   if (resent)
     q->recovered += resent;
   if (popped && q->stall_logged) {
@@ -367,16 +426,61 @@ static void sctp_rtx_tick(Sctp* sctp) {
     return;
   q->last_scan_ms = now;
   /* RFC 4960 starts at 3 s; a controller wants far less. Twice the
-   * measured round trip, 200 ms to 1 s, doubling on each retry. */
-  uint32_t rto = sctp->smoothed_rtt_ms ? sctp->smoothed_rtt_ms * 2 + 50 : 300;
-  if (rto < 200)
-    rto = 200;
+   * measured round trip plus the peer's SACK delay, 300 ms to 1 s,
+   * doubling on each retry (beta.31: 200 ms resent many chunks whose SACK
+   * was simply still on its way). */
+  uint32_t rto = sctp->smoothed_rtt_ms ? sctp->smoothed_rtt_ms * 2 + 100 : 400;
+  if (rto < 300)
+    rto = 300;
   if (rto > 1000)
     rto = 1000;
+  const int forward = q->peer_prsctp && !q->fwd_off;
+  if (forward) {
+    /* Give up overdue controller states from the front of the queue (and
+     * anything a SACK gap already covered), up to the first chunk that
+     * must still arrive. */
+    unsigned n = 0, given_up = 0;
+    uint32_t last = 0;
+    while (n < q->count) {
+      const SctpRtxPacket* p = sctp_rtx_at(q, n);
+      const int overdue = p->lossy && (uint32_t)(now - p->first_ms) >= rto;
+      if (!p->acked && !overdue)
+        break;
+      if (!p->acked)
+        ++given_up;
+      last = p->tsn;
+      ++n;
+    }
+    if (n) {
+      q->head = (q->head + n) % SCTP_RTX_SLOTS;
+      q->count -= n;
+      q->abandoned += given_up;
+      if (!q->have_adv || (int32_t)(last - q->adv_point) > 0) {
+        q->adv_point = last;
+        q->have_adv = 1;
+        q->fwd_sent_ms = now - 10000;
+      }
+      if (q->stall_logged) {
+        sctp_diag_log("rtx_resumed skipped=%u outstanding=%u", given_up, q->count);
+        q->stall_logged = 0;
+      }
+    }
+    /* Repeat the FORWARD-TSN until a SACK shows the peer moved past it. */
+    if (q->have_adv && (!q->have_peer_cum || (int32_t)(q->peer_cum - q->adv_point) < 0) &&
+        (uint32_t)(now - q->fwd_sent_ms) >= rto) {
+      sctp_send_forward_tsn(sctp, q->adv_point);
+      q->fwd_sent_ms = now;
+      if (q->fwd_sent++ < 10 || q->fwd_sent % 200 == 0)
+        sctp_diag_log("fwd_tsn adv=%u peerCum=%u abandoned=%u sent=%u", q->adv_point, q->peer_cum,
+                      q->abandoned, q->fwd_sent);
+    }
+    if (!q->count)
+      return;
+  }
   unsigned sent = 0;
   for (unsigned i = 0; i < q->count && sent < 8; i++) {
     SctpRtxPacket* p = sctp_rtx_at(q, i);
-    if (p->acked)
+    if (p->acked || (forward && p->lossy))
       continue;
     const uint32_t wait = rto << (p->tries < 3 ? p->tries : 3);
     if ((uint32_t)(now - p->sent_ms) < wait)
@@ -400,8 +504,21 @@ static void sctp_rtx_tick(Sctp* sctp) {
 }
 #endif
 
+static int sctp_outgoing_data_ex(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid,
+                                 int lossy);
+
 int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid) {
+  return sctp_outgoing_data_ex(sctp, buf, len, ppid, sid, 0);
+}
+
+int sctp_outgoing_data_lossy(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid) {
+  return sctp_outgoing_data_ex(sctp, buf, len, ppid, sid, 1);
+}
+
+static int sctp_outgoing_data_ex(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid,
+                                 int lossy) {
 #if CONFIG_USE_USRSCTP
+  (void)lossy;
   if (!sctp || !sctp->sock || !sctp->connected || sctp->closing) {
     errno = ENOTCONN;
     return -1;
@@ -487,7 +604,7 @@ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uin
     packet->header.checksum = htonl(sctp_get_checksum(sctp, (const uint8_t*)sctp->buf, SCTP_MTU));
 
     const int fragment_ret = sctp_outgoing_data_cb(sctp, sctp->buf, SCTP_MTU, 0, 0);
-    sctp_rtx_store(sctp, ntohl(chunk->tsn), sctp->buf, SCTP_MTU);
+    sctp_rtx_store(sctp, ntohl(chunk->tsn), sctp->buf, SCTP_MTU, 0);
     if (fragment_ret < 0)
       return -1;
     sctp->last_outbound_tsn = ntohl(chunk->tsn);
@@ -511,7 +628,7 @@ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uin
 
     /* Kept even when the write failed: the TSN is used up either way. */
     const int last_ret = sctp_outgoing_data_cb(sctp, sctp->buf, padding_len, 0, 0);
-    sctp_rtx_store(sctp, ntohl(chunk->tsn), sctp->buf, padding_len);
+    sctp_rtx_store(sctp, ntohl(chunk->tsn), sctp->buf, padding_len, lossy);
     if (last_ret < 0)
       return -1;
     sctp->last_outbound_tsn = ntohl(chunk->tsn);
@@ -674,11 +791,18 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         SctpInitChunk* init_chunk;
         init_chunk = (SctpInitChunk*)in_packet->chunks;
         sctp->verification_tag = init_chunk->initiate_tag;
+        {
+          const int init_length = ntohs(init_chunk->common.length);
+          const int available = (int)len - (int)sizeof(SctpHeader);
+          const int params_length = (init_length < available ? init_length : available) - 20;
+          if (params_length > 0)
+            sctp_peer_params(sctp, (const uint8_t*)init_chunk->param, params_length);
+        }
 
         SctpInitChunk* init_ack = (SctpInitChunk*)out_packet->chunks;
         init_ack->common.type = SCTP_INIT_ACK;
         init_ack->common.flags = 0x00;
-        init_ack->common.length = htons(20 + 8);
+        init_ack->common.length = htons(20 + 8 + 4);
         init_ack->initiate_tag = htonl(0x12345678);
         init_ack->a_rwnd = htonl(0x100000);
         init_ack->number_of_outbound_streams = 0xffff;
@@ -691,6 +815,10 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         param->length = htons(8);
         const uint32_t cookie_value = htonl(0x02);
         memcpy(param->value, &cookie_value, sizeof(cookie_value));
+        /* We take FORWARD-TSN too (RFC 3758). */
+        SctpChunkParam* forward_param = (SctpChunkParam*)((uint8_t*)init_ack->param + 8);
+        forward_param->type = htons(SCTP_PARAM_FORWARD_TSN_SUPPORTED);
+        forward_param->length = htons(4);
         length = ntohs(init_ack->common.length) + sizeof(SctpHeader);
         sctp_diag_log("internal_init_ack prepared peerTag=%08x localTag=12345678 bytes=%zu",
                       ntohl(sctp->verification_tag), length);
@@ -709,12 +837,12 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
           const uint16_t candidate_length = ntohs(candidate->length);
           if (candidate_length < 4 || offset + candidate_length > init_ack_length - 20)
             break;
-          if (candidate_type == SCTP_PARAM_STATE_COOKIE) {
+          if (candidate_type == SCTP_PARAM_STATE_COOKIE && !param)
             param = candidate;
-            break;
-          }
           offset += (candidate_length + 3) & ~3;
         }
+        if (init_ack_length > 20)
+          sctp_peer_params(sctp, params, init_ack_length - 20);
         if (!param) {
           LOGE("SCTP_INIT_ACK without cookie");
           break;
@@ -800,6 +928,19 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         }
         break;
       }
+      case SCTP_ERROR: {
+        SctpRetransmitQueue* q = sctp->rtx;
+        uint16_t cause = 0;
+        if (len - pos >= 8)
+          memcpy(&cause, buf + pos + 4, 2);
+        sctp_diag_log("error_chunk cause=%u fwdSent=%u", ntohs(cause), q ? q->fwd_sent : 0);
+        /* Cause 6: unrecognized chunk type, i.e. our FORWARD-TSN. */
+        if (q && q->fwd_sent && ntohs(cause) == 6 && !q->fwd_off) {
+          q->fwd_off = 1;
+          sctp_diag_log("prsctp off: the peer rejected FORWARD-TSN");
+        }
+        length = 0;
+      } break;
       case SCTP_ABORT:
         sctp->connected = 0;
         if (sctp->onclose) {
@@ -824,7 +965,7 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
       out_packet->header.checksum = htonl(calculated_checksum);
       const int written = dtls_srtp_write(sctp->dtls_srtp, sctp->buf, length);
       if (bundled_data) {
-        sctp_rtx_store(sctp, bundled_tsn, sctp->buf, length);
+        sctp_rtx_store(sctp, bundled_tsn, sctp->buf, length, 0);
         bundled_data = 0;
       }
       static uint32_t internal_tx_diag_count = 0;
@@ -1246,12 +1387,16 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
   header->verification_tag = 0x0;
   init_chunk->common.type = SCTP_INIT;
   init_chunk->common.flags = 0x00;
-  init_chunk->common.length = htons(20);
+  init_chunk->common.length = htons(20 + 4);
   init_chunk->initiate_tag = htonl(0x12345678);
   init_chunk->a_rwnd = htonl(0x100000);
   init_chunk->number_of_outbound_streams = 0xffff;
   init_chunk->number_of_inbound_streams = 0xffff;
   init_chunk->initial_tsn = htonl(sctp->tsn);
+  /* FORWARD-TSN supported (RFC 3758): lets lost controller states be
+   * skipped instead of resent. */
+  init_chunk->param[0].type = htons(SCTP_PARAM_FORWARD_TSN_SUPPORTED);
+  init_chunk->param[0].length = htons(4);
   length = ntohs(init_chunk->common.length) + sizeof(SctpHeader);
   length = (4 * ((length + 3) / 4));
   // The same buffer is reused for retries. SCTP checksums are calculated with
@@ -1298,10 +1443,12 @@ void sctp_destroy_association(Sctp* sctp) {
   sctp->stream_count = 0;
   memset(sctp->stream_table, 0, sizeof(sctp->stream_table));
 #if !CONFIG_USE_USRSCTP
-  if (sctp->rtx && (sctp->rtx->retransmits || sctp->rtx->full))
-    sctp_diag_log("rtx_summary retransmits=%u recovered=%u full=%u oversize=%u outstanding=%u",
+  if (sctp->rtx && (sctp->rtx->retransmits || sctp->rtx->full || sctp->rtx->abandoned))
+    sctp_diag_log("rtx_summary retransmits=%u recovered=%u full=%u oversize=%u outstanding=%u "
+                  "prsctp=%d abandoned=%u fwd=%u",
                   sctp->rtx->retransmits, sctp->rtx->recovered, sctp->rtx->full, sctp->rtx->oversize,
-                  sctp->rtx->count);
+                  sctp->rtx->count, sctp->rtx->peer_prsctp && !sctp->rtx->fwd_off, sctp->rtx->abandoned,
+                  sctp->rtx->fwd_sent);
 #endif
   free(sctp->rtx);
   sctp->rtx = NULL;

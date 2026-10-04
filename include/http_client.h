@@ -29,4 +29,8 @@ void http_cancel(void);
 typedef void (*HttpProgress)(unsigned long long received, unsigned long long total, void *context);
 void http_next_request(long timeout_seconds, HttpProgress progress, void *context);
 char *http_url_encode(const char *value);
+/* The console clock is clearly wrong (before this build, or years ahead),
+ * so certificates cannot be checked and HTTPS fails. Writes the date the
+ * 3DS thinks it is ("2011-01-01") when date is not NULL. */
+bool http_clock_wrong(char *date, size_t size);
 

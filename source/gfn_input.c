@@ -158,6 +158,19 @@ static void apply_gyro(GfnGamepadState *state, u32 held)
 }
 
 void gfn_input_set_virtual_buttons(uint16_t buttons) { g_virtual_buttons = buttons; }
+
+static float g_touch_look_x, g_touch_look_y;
+static float g_touch_stick_x, g_touch_stick_y;
+void gfn_input_set_touch_stick(float x, float y)
+{
+    g_touch_stick_x = x;
+    g_touch_stick_y = y;
+}
+void gfn_input_set_touch_look(float x, float y)
+{
+    g_touch_look_x = x;
+    g_touch_look_y = y;
+}
 void gfn_input_set_suppressed(bool suppressed) { g_suppressed = suppressed; }
 
 uint16_t gfn_input_buttons_for_keys(u32 keys)
@@ -241,7 +254,19 @@ void gfn_input_read_3ds(GfnGamepadState *state)
     /* Camera speed: Slow tops out at 70 %; Fast and Fastest reach a full
      * turn with a lighter push on the short C-Stick. */
     static const float camera_gain[] = { 0.7f, 1.0f, 1.3f, 1.6f };
-    scale_stick(cstick.dx, cstick.dy, 140, camera_gain[g_config.camera_speed], &state->right_x, &state->right_y);
+    /* The touch camera's stick joins the C-Stick before scaling, so it
+     * has the same deadzone, curve and speed. */
+    const int cx = cstick.dx + (int)(g_touch_stick_x * 140.0f), cy = cstick.dy + (int)(g_touch_stick_y * 140.0f);
+    scale_stick(cx, cy, 140, camera_gain[g_config.camera_speed], &state->right_x, &state->right_y);
+    if (g_touch_look_x != 0.0f || g_touch_look_y != 0.0f) {
+        const float gain = camera_gain[g_config.camera_speed] * 32767.0f;
+        float rx = (float)state->right_x + g_touch_look_x * gain;
+        float ry = (float)state->right_y + g_touch_look_y * gain;
+        rx = rx > 32767.0f ? 32767.0f : rx < -32767.0f ? -32767.0f : rx;
+        ry = ry > 32767.0f ? 32767.0f : ry < -32767.0f ? -32767.0f : ry;
+        state->right_x = (int16_t)rx;
+        state->right_y = (int16_t)ry;
+    }
     /* Before the gyro, which keeps its own direction. */
     if (g_config.camera_invert >= 1) state->right_y = (int16_t)-state->right_y;
     if (g_config.camera_invert == 2) state->right_x = (int16_t)-state->right_x;

@@ -161,6 +161,10 @@ void gfn_tick(GfnClient *client);
 bool gfn_fetch_library(GfnClient *client);
 /* The owned library as last fetched, from the SD card (instant, offline). */
 bool gfn_library_load(GfnClient *client);
+/* The account's library as last loaded (any thread): whether it is known
+ * yet and how many games it has, and whether a game (any store) is in it. */
+bool gfn_library_known(unsigned *games);
+bool gfn_in_library(const GfnGame *game);
 /* Measure Wi-Fi, latency and throughput to NVIDIA (a few seconds). */
 bool gfn_connection_test(GfnClient *client);
 /* Remember the running session on the SD card (cleared when it stops), so a

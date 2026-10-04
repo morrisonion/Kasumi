@@ -15,6 +15,8 @@ typedef struct {
     int camera_speed;
     int camera_invert;
     int gyro_speed;
+    /* Touch camera (AppSettings.touch_camera). */
+    int touch_camera;
     /* Custom button mapping (GFN_OUT_* per GFN_IN_*), when has_map. */
     bool has_map;
     unsigned char map[14];

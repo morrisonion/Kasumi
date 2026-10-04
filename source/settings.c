@@ -20,12 +20,16 @@ void settings_defaults(AppSettings *settings)
     settings->wide_video = true;
     settings->bitrate_mode = STREAM_BITRATE_ADAPTIVE;
     settings->sharpen = false;
+    settings->fps60 = false;
     settings->video_sharpen = 1;
     settings->video_color = 1;
     settings->gyro_mode = GFN_GYRO_OFF;
     settings->gyro_speed = 1;
     settings->camera_speed = 1;
     settings->camera_invert = 0;
+    settings->touch_camera = 1;
+    settings->touch_camera_shown = false;
+    settings->touch_stick_size = 1;
     settings->theme = UI_THEME_AI; /* indigo: the default look since beta.30 */
     settings->volume = 5;
     settings->mute_in_menus = false;
@@ -90,6 +94,7 @@ bool settings_load(AppSettings *settings)
     settings->bitrate_mode = (StreamBitrateMode)read_int(root, "bitrate66", settings->bitrate_mode,
                                                          STREAM_BITRATE_COUNT);
     settings->sharpen = read_bool(root, "sharpen", settings->sharpen);
+    settings->fps60 = read_bool(root, "fps60", settings->fps60);
     settings->video_sharpen = (unsigned)read_int(root, "video_sharpen", (int)settings->video_sharpen, 4);
     settings->video_color = (unsigned)read_int(root, "video_color", (int)settings->video_color, 3);
     settings->gyro_mode = (GfnGyroMode)read_int(root, "gyro_mode", settings->gyro_mode,
@@ -97,6 +102,9 @@ bool settings_load(AppSettings *settings)
     settings->gyro_speed = (unsigned)read_int(root, "gyro_speed", (int)settings->gyro_speed, 3);
     settings->camera_speed = (unsigned)read_int(root, "camera_speed", (int)settings->camera_speed, 4);
     settings->camera_invert = (unsigned)read_int(root, "camera_invert", (int)settings->camera_invert, 3);
+    settings->touch_camera = (unsigned)read_int(root, "touch_camera", (int)settings->touch_camera, 3);
+    settings->touch_camera_shown = read_bool(root, "touch_camera_shown", settings->touch_camera_shown);
+    settings->touch_stick_size = (unsigned)read_int(root, "touch_stick_size", (int)settings->touch_stick_size, 3);
     settings->theme = (unsigned)read_int(root, "theme", (int)settings->theme, UI_THEME_COUNT);
     settings->volume = (unsigned)read_int(root, "volume", (int)settings->volume, 6);
     settings->mute_in_menus = read_bool(root, "mute_in_menus", settings->mute_in_menus);
@@ -160,6 +168,10 @@ bool settings_save(const AppSettings *settings)
     if (!root) return false;
     json_object_set_new(root, "camera_speed", json_integer((json_int_t)settings->camera_speed));
     json_object_set_new(root, "camera_invert", json_integer((json_int_t)settings->camera_invert));
+    json_object_set_new(root, "touch_camera", json_integer((json_int_t)settings->touch_camera));
+    json_object_set_new(root, "fps60", json_boolean(settings->fps60));
+    json_object_set_new(root, "touch_camera_shown", json_boolean(settings->touch_camera_shown));
+    json_object_set_new(root, "touch_stick_size", json_integer((json_int_t)settings->touch_stick_size));
     json_object_set_new(root, "video_sharpen", json_integer((json_int_t)settings->video_sharpen));
     json_object_set_new(root, "video_color", json_integer((json_int_t)settings->video_color));
     const bool ok = json_dump_file(root, SETTINGS_PATH, JSON_INDENT(2)) == 0;
@@ -171,6 +183,8 @@ void settings_apply_picture(const AppSettings *settings)
 {
     stream_profile_configure(settings->wide_video, settings->bitrate_mode);
     stream_profile_set_sharpen(settings->sharpen);
+    /* The 60 fps test is hidden for now (screens.c): always 30. */
+    stream_profile_set_fps60(false);
     stream_profile_set_weak(settings->net_weak);
     regions_set_choice(settings->server);
     ui_set_theme((UiTheme)settings->theme);

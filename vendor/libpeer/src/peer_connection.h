@@ -153,6 +153,9 @@ int peer_connection_datachannel_send(PeerConnection* pc, char* message, size_t l
 int peer_connection_datachannel_send_sid(PeerConnection* pc, char* message, size_t len, uint16_t sid);
 
 int peer_connection_datachannel_send_binary_sid(PeerConnection* pc, char* message, size_t len, uint16_t sid);
+/* A message the next one replaces (a controller state, a heartbeat): skipped
+ * rather than resent if lost, when the peer allows that. */
+int peer_connection_datachannel_send_binary_lossy_sid(PeerConnection* pc, char* message, size_t len, uint16_t sid);
 
 int peer_connection_send_audio(PeerConnection* pc, const uint8_t* packet, size_t bytes);
 
